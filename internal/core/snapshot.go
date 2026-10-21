@@ -21,6 +21,14 @@ const (
 	KindImage
 )
 
+type Format uint8
+
+const (
+	FormatText Format = iota + 1
+	FormatDIBV5
+	FormatDIB
+)
+
 type Snapshot struct {
 	CaptureID    string
 	CapturedAt   time.Time
