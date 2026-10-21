@@ -25,9 +25,7 @@ const (
 	windowHeightDIP      = 520
 	minWindowWidthDIP    = 320
 	minWindowHeightDIP   = 300
-	titleIconGapDIP      = 10
 	appIconWidthDIP      = 16
-	titleTextGapDIP      = 10
 	statusTextPaddingDIP = 12
 	statusCancelWidthDIP = 56
 	onePixelDIP          = 1
@@ -99,6 +97,7 @@ type Document struct {
 
 	edit            win.HWND
 	fonts           documentFonts
+	titleTextWidth  int
 	hover           titlebarButton
 	tracking        bool
 	cacheState      string
@@ -114,6 +113,8 @@ type Document struct {
 	saveResult      *saveCompletion
 	destroyed       bool
 	image           imageRaster
+	scrollbars      scrollbarVisibility
+	updatingBars    bool
 }
 
 type saveCompletion struct {
@@ -164,6 +165,10 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 		cacheState:      "",
 		saveProgress:    newProgressState(options.ProgressDelay),
 		image:           raster,
+		scrollbars: scrollbarVisibility{
+			horizontal: options.Snapshot.Kind == core.KindText,
+			vertical:   options.Snapshot.Kind == core.KindText,
+		},
 	}
 	doc.native.handler = doc
 
@@ -185,6 +190,7 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 		return nil, err
 	}
 	doc.native.hwnd = hwnd
+	applyDocumentDwmAttributes(hwnd, doc.logger)
 
 	dpi := dpiFor(hwnd)
 	doc.fonts, err = fontsForDPI(dpi)
@@ -220,6 +226,9 @@ func (d *Document) Show() {
 	}
 	d.native.hwnd.ShowWindow(co.SW_SHOW)
 	d.native.hwnd.UpdateWindow()
+	// DWM can reset frame attributes while mapping the window, so apply the
+	// border policy again after the first frame is visible.
+	applyDocumentDwmAttributes(d.native.hwnd, d.logger)
 	if d.edit != 0 {
 		_, _ = d.edit.SetFocus()
 	}
@@ -294,7 +303,9 @@ func (d *Document) createEditor() error {
 	if _, err := edit.SendMessage(co.WM_SETFONT, win.WPARAM(d.fonts.ui), 1); err != nil {
 		return fmt.Errorf("set document editor font: %w", err)
 	}
+	d.updateTitleTextWidth()
 	d.layoutEditor()
+	d.updateScrollbars()
 	_ = d.native.hwnd.InvalidateRect(nil, true)
 	_ = d.native.hwnd.UpdateWindow()
 	_ = dpi
@@ -311,6 +322,10 @@ func (d *Document) handleNativeMessage(
 		if wParam != 0 {
 			return 0, true
 		}
+	case co.WM_NCACTIVATE:
+		return 1, true
+	case co.WM_NCPAINT:
+		return 0, true
 	case co.WM_GETMINMAXINFO:
 		d.handleMinMaxInfo(lParam)
 		return 0, true
@@ -325,7 +340,15 @@ func (d *Document) handleNativeMessage(
 		if err != nil {
 			return 0, false
 		}
-		return uintptr(titlebarHitTest(width, height, dpi, int(point.X), int(point.Y))), true
+		layout := titlebarLayoutFor(width, dpi, d.titleTextWidth)
+		return uintptr(titlebarHitTest(
+			width,
+			height,
+			dpi,
+			layout,
+			int(point.X),
+			int(point.Y),
+		)), true
 	case co.WM_DPICHANGED:
 		d.handleDPIChanged(lParam)
 		return 0, true
@@ -335,6 +358,7 @@ func (d *Document) handleNativeMessage(
 		return d.handlePaint()
 	case co.WM_SIZE:
 		d.layoutEditor()
+		d.updateScrollbars()
 		_ = d.native.hwnd.InvalidateRect(nil, true)
 		return 0, false
 	case co.WM_CTLCOLOREDIT:
@@ -407,6 +431,7 @@ func (d *Document) handleDPIChanged(lParam win.LPARAM) {
 		true,
 	)
 	d.layoutEditor()
+	d.updateScrollbars()
 	_ = d.native.hwnd.InvalidateRect(nil, true)
 }
 
@@ -451,6 +476,9 @@ func (d *Document) paint(hdc win.HDC) error {
 		Left: 0, Top: 0, Right: int32(width), Bottom: int32(titleHeight),
 	}, titlebar); err != nil {
 		return fmt.Errorf("paint titlebar: %w", err)
+	}
+	if err := d.measureTitleTextWidth(hdc); err != nil {
+		return err
 	}
 	if err := d.paintButtonBackground(hdc, width, dpi); err != nil {
 		return err
@@ -509,12 +537,14 @@ func (d *Document) paintButtonBackground(hdc win.HDC, width, dpi int) error {
 	if err != nil {
 		return err
 	}
+	layout := titlebarLayoutFor(width, dpi, d.titleTextWidth)
 	rect := win.RECT{Top: 0, Bottom: int32(titleHeight)}
 	switch d.hover {
 	case titlebarButtonSave:
-		rect.Right = int32(scaleDIP(saveButtonWidthDIP, dpi))
+		rect.Left = int32(layout.saveLeft)
+		rect.Right = int32(layout.saveRight)
 	case titlebarButtonClose:
-		rect.Left = int32(width - scaleDIP(closeButtonWidthDIP, dpi))
+		rect.Left = int32(layout.closeLeft)
 		rect.Right = int32(width)
 	}
 	if err := hdc.FillRect(&rect, brush); err != nil {
@@ -528,37 +558,42 @@ func (d *Document) paintTitle(hdc win.HDC, width, titleHeight, dpi int) error {
 		return fmt.Errorf("set titlebar text background mode: %w", err)
 	}
 
-	saveWidth := scaleDIP(saveButtonWidthDIP, dpi)
-	if err := drawGlyphCentered(
-		hdc,
-		win.RECT{Left: 0, Top: 0, Right: int32(saveWidth), Bottom: int32(titleHeight)},
-		"\uE74E",
-		d.fonts.icon,
-		colorTextPrimary,
-	); err != nil {
-		return err
-	}
-
-	iconLeft := saveWidth + scaleDIP(titleIconGapDIP, dpi)
+	layout := titlebarLayoutFor(width, dpi, d.titleTextWidth)
 	iconTop := (titleHeight - scaleDIP(appIconWidthDIP, dpi)) / 2
-	if err := d.paintAppIcon(hdc, iconLeft, iconTop, dpi); err != nil {
+	if err := d.paintAppIcon(hdc, layout.iconLeft, iconTop, dpi); err != nil {
 		return err
 	}
 
-	titleLeft := iconLeft + scaleDIP(appIconWidthDIP+titleTextGapDIP, dpi)
-	titleRight := width - scaleDIP(closeButtonWidthDIP, dpi)
+	titleWidth := layout.titleRight - layout.titleLeft
+	if titleWidth < 0 {
+		titleWidth = 0
+	}
 	title := fitText(
 		hdc,
 		d.title(),
-		titleRight-titleLeft-scaleDIP(titleTextGapDIP, dpi),
+		titleWidth,
 		d.fonts.title,
 	)
 	if err := drawTextVerticallyCentered(
 		hdc,
-		win.POINT{X: int32(titleLeft), Y: 0},
-		win.SIZE{Cx: int32(titleRight - titleLeft), Cy: int32(titleHeight)},
+		win.POINT{X: int32(layout.titleLeft), Y: 0},
+		win.SIZE{Cx: int32(titleWidth), Cy: int32(titleHeight)},
 		title,
 		d.fonts.title,
+		colorTextPrimary,
+	); err != nil {
+		return err
+	}
+	if err := drawGlyphCentered(
+		hdc,
+		win.RECT{
+			Left:   int32(layout.saveLeft),
+			Top:    0,
+			Right:  int32(layout.saveRight),
+			Bottom: int32(titleHeight),
+		},
+		"\uE74E",
+		d.fonts.icon,
 		colorTextPrimary,
 	); err != nil {
 		return err
@@ -571,7 +606,7 @@ func (d *Document) paintTitle(hdc win.HDC, width, titleHeight, dpi int) error {
 	return drawGlyphCentered(
 		hdc,
 		win.RECT{
-			Left:   int32(width - scaleDIP(closeButtonWidthDIP, dpi)),
+			Left:   int32(layout.closeLeft),
 			Top:    0,
 			Right:  int32(width),
 			Bottom: int32(titleHeight),
@@ -580,6 +615,39 @@ func (d *Document) paintTitle(hdc win.HDC, width, titleHeight, dpi int) error {
 		d.fonts.icon,
 		closeColor,
 	)
+}
+
+func (d *Document) measureTitleTextWidth(hdc win.HDC) error {
+	oldFont, err := hdc.SelectObjectFont(d.fonts.title)
+	if err != nil {
+		return fmt.Errorf("select title font for measurement: %w", err)
+	}
+	defer func() {
+		_, _ = hdc.SelectObjectFont(oldFont)
+	}()
+	size, err := hdc.GetTextExtentPoint32(d.title())
+	if err != nil {
+		return fmt.Errorf("measure titlebar text: %w", err)
+	}
+	d.titleTextWidth = int(size.Cx)
+	return nil
+}
+
+func (d *Document) updateTitleTextWidth() {
+	if d.native.hwnd == 0 {
+		return
+	}
+	hdc, err := d.native.hwnd.GetDC()
+	if err != nil {
+		d.logError("get titlebar measuring DC", err)
+		return
+	}
+	defer func() {
+		_ = d.native.hwnd.ReleaseDC(hdc)
+	}()
+	if err := d.measureTitleTextWidth(hdc); err != nil {
+		d.logError("measure titlebar layout", err)
+	}
 }
 
 func (d *Document) paintAppIcon(hdc win.HDC, left, top, dpi int) error {
@@ -780,6 +848,7 @@ func (d *Document) handleCommand(wParam win.WPARAM) {
 		return
 	}
 	d.saveState.SetText(text)
+	d.updateScrollbars()
 	d.refreshTitle()
 	_ = d.native.hwnd.InvalidateRect(nil, true)
 }
@@ -810,7 +879,8 @@ func (d *Document) handleClick(lParam win.LPARAM) {
 		_ = d.native.hwnd.InvalidateRect(nil, true)
 		return
 	}
-	switch titlebarButtonAt(width, height, dpi, x, y) {
+	layout := titlebarLayoutFor(width, dpi, d.titleTextWidth)
+	switch titlebarButtonAt(layout, height, dpi, x, y) {
 	case titlebarButtonSave:
 		shift, _ := win.GetKeyState(co.VK_SHIFT)
 		d.saveDocument(shift)
@@ -826,12 +896,14 @@ func (d *Document) handleMouseMove(lParam win.LPARAM) {
 		return
 	}
 	x, y := decodeMousePosition(uintptr(lParam))
-	next := titlebarButtonAt(width, height, dpiFor(d.native.hwnd), x, y)
+	dpi := dpiFor(d.native.hwnd)
+	layout := titlebarLayoutFor(width, dpi, d.titleTextWidth)
+	next := titlebarButtonAt(layout, height, dpi, x, y)
 	if next != d.hover {
 		d.hover = next
 		_ = d.native.hwnd.InvalidateRect(&win.RECT{
 			Left: 0, Top: 0, Right: int32(width),
-			Bottom: int32(scaleDIP(titlebarHeightDIP, dpiFor(d.native.hwnd))),
+			Bottom: int32(scaleDIP(titlebarHeightDIP, dpi)),
 		}, true)
 	}
 	if !d.tracking {
@@ -1094,6 +1166,7 @@ func (d *Document) logError(message string, err error) {
 func (d *Document) refreshTitle() {
 	title := d.title()
 	_ = d.native.hwnd.SetWindowText(title)
+	d.updateTitleTextWidth()
 	_ = d.native.hwnd.InvalidateRect(nil, true)
 }
 

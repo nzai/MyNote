@@ -6,6 +6,9 @@ import "github.com/rodrigocfd/windigo/co"
 
 const (
 	titlebarHeightDIP   = 40
+	titlebarPaddingDIP  = 12
+	titleSaveGapDIP     = 8
+	iconTitleGapDIP     = 8
 	saveButtonWidthDIP  = 44
 	closeButtonWidthDIP = 44
 	resizeBorderDIP     = 6
@@ -20,7 +23,50 @@ const (
 	titlebarButtonClose
 )
 
-func titlebarHitTest(width, height, dpi, x, y int) co.HT {
+type titlebarLayout struct {
+	iconLeft   int
+	titleLeft  int
+	titleRight int
+	saveLeft   int
+	saveRight  int
+	closeLeft  int
+}
+
+func titlebarLayoutFor(width, dpi, titleWidth int) titlebarLayout {
+	if titleWidth < 0 {
+		titleWidth = 0
+	}
+	iconLeft := scaleDIP(titlebarPaddingDIP, dpi)
+	titleLeft := iconLeft + scaleDIP(appIconWidthDIP+iconTitleGapDIP, dpi)
+	gap := scaleDIP(titleSaveGapDIP, dpi)
+	saveWidth := scaleDIP(saveButtonWidthDIP, dpi)
+	closeWidth := scaleDIP(closeButtonWidthDIP, dpi)
+
+	closeLeft := width - closeWidth
+	maxSaveLeft := closeLeft - saveWidth - gap
+	if maxSaveLeft < titleLeft {
+		maxSaveLeft = titleLeft
+	}
+	saveLeft := titleLeft + titleWidth + gap
+	if saveLeft > maxSaveLeft {
+		saveLeft = maxSaveLeft
+	}
+	saveRight := saveLeft + saveWidth
+	titleRight := saveLeft - gap
+	if titleRight < titleLeft {
+		titleRight = titleLeft
+	}
+	return titlebarLayout{
+		iconLeft:   iconLeft,
+		titleLeft:  titleLeft,
+		titleRight: titleRight,
+		saveLeft:   saveLeft,
+		saveRight:  saveRight,
+		closeLeft:  closeLeft,
+	}
+}
+
+func titlebarHitTest(width, height, dpi int, layout titlebarLayout, x, y int) co.HT {
 	if x < 0 || y < 0 || x >= width || y >= height {
 		return co.HT_NOWHERE
 	}
@@ -51,7 +97,7 @@ func titlebarHitTest(width, height, dpi, x, y int) co.HT {
 	}
 
 	if y < scaleDIP(titlebarHeightDIP, dpi) {
-		if titlebarButtonAt(width, height, dpi, x, y) != titlebarButtonNone {
+		if titlebarButtonAt(layout, height, dpi, x, y) != titlebarButtonNone {
 			return co.HT_CLIENT
 		}
 		return co.HT_CAPTION
@@ -59,17 +105,17 @@ func titlebarHitTest(width, height, dpi, x, y int) co.HT {
 	return co.HT_CLIENT
 }
 
-func titlebarButtonAt(width, height, dpi, x, y int) titlebarButton {
-	if x < 0 || y < 0 || x >= width || y >= height {
+func titlebarButtonAt(layout titlebarLayout, height, dpi, x, y int) titlebarButton {
+	if x < 0 || y < 0 || y >= height {
 		return titlebarButtonNone
 	}
 	if y >= scaleDIP(titlebarHeightDIP, dpi) {
 		return titlebarButtonNone
 	}
-	if x < scaleDIP(saveButtonWidthDIP, dpi) {
+	if x >= layout.saveLeft && x < layout.saveRight {
 		return titlebarButtonSave
 	}
-	if x >= width-scaleDIP(closeButtonWidthDIP, dpi) {
+	if x >= layout.closeLeft {
 		return titlebarButtonClose
 	}
 	return titlebarButtonNone

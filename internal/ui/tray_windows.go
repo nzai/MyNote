@@ -135,7 +135,7 @@ func (t *Tray) data() trayNotifyIconData {
 func trayActionFor(lParam win.LPARAM) trayAction {
 	event := uint32(lParam) & 0xffff
 	switch event {
-	case uint32(co.WM_LBUTTONUP), ninSelect, ninKeySelect:
+	case ninSelect, ninKeySelect:
 		return trayActionOpen
 	case uint32(co.WM_RBUTTONUP):
 		return trayActionMenu

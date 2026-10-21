@@ -42,8 +42,9 @@ func TestTrayActionFor(t *testing.T) {
 		lParam win.LPARAM
 		want   trayAction
 	}{
-		{name: "left up", lParam: win.LPARAM(co.WM_LBUTTONUP), want: trayActionOpen},
+		{name: "legacy left up is ignored with version 4", lParam: win.LPARAM(co.WM_LBUTTONUP), want: trayActionNone},
 		{name: "select", lParam: win.LPARAM(ninSelect), want: trayActionOpen},
+		{name: "keyboard select", lParam: win.LPARAM(ninKeySelect), want: trayActionOpen},
 		{name: "right up", lParam: win.LPARAM(co.WM_RBUTTONUP), want: trayActionMenu},
 		{name: "other", lParam: win.LPARAM(co.WM_MOUSEMOVE), want: trayActionNone},
 	}

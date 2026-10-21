@@ -9,7 +9,37 @@ import (
 	"testing"
 
 	"github.com/nzai/MyNote/internal/core"
+	"github.com/rodrigocfd/windigo/co"
+	"github.com/rodrigocfd/windigo/win"
 )
+
+func TestDocumentDwmAttributesRemoveVisibleBorder(t *testing.T) {
+	attrs := documentDwmAttributes()
+	if len(attrs) == 0 {
+		t.Fatal("document must configure at least one DWM attribute")
+	}
+	for _, attr := range attrs {
+		if borderColor, ok := attr.BorderColor(); ok {
+			if borderColor != win.COLORREF_DWMA_NONE {
+				t.Fatalf("DWM border color = %#x, want none", borderColor)
+			}
+			return
+		}
+	}
+	t.Fatal("document DWM attributes do not remove the visible border")
+}
+
+func TestDocumentSuppressesLegacyNonClientBorder(t *testing.T) {
+	document := &Document{}
+	ret, handled := document.handleNativeMessage(co.WM_NCACTIVATE, 1, 0)
+	if !handled || ret != 1 {
+		t.Fatalf("WM_NCACTIVATE = (%d, %v), want (1, true)", ret, handled)
+	}
+	ret, handled = document.handleNativeMessage(co.WM_NCPAINT, 1, 0)
+	if !handled || ret != 0 {
+		t.Fatalf("WM_NCPAINT = (%d, %v), want (0, true)", ret, handled)
+	}
+}
 
 func TestCreateDocumentWindows(t *testing.T) {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
