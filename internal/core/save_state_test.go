@@ -40,6 +40,20 @@ func TestSaveStateBecomesCleanWhenTextMatchesLastSave(t *testing.T) {
 	}
 }
 
+func TestSaveStateKeepsNewerEditsDirtyAfterSavingEarlierText(t *testing.T) {
+	state := NewSaveState("alpha")
+	state.SetText("written")
+	state.SetText("newer")
+
+	state.MarkSavedText(`C:\Temp\written.txt`, "written")
+	if !state.Dirty() {
+		t.Fatal("edits made after the saved text must remain dirty")
+	}
+	if state.Path() != `C:\Temp\written.txt` {
+		t.Fatalf("path = %q", state.Path())
+	}
+}
+
 func TestReadOnlySaveStateIgnoresTextEdits(t *testing.T) {
 	state := NewReadOnlySaveState()
 	state.SetText("ignored")

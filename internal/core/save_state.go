@@ -32,7 +32,11 @@ func (s *SaveState) SetText(text string) {
 }
 
 func (s *SaveState) MarkSaved(path string) {
-	s.lastSavedText = s.currentText
+	s.MarkSavedText(path, s.currentText)
+}
+
+func (s *SaveState) MarkSavedText(path, text string) {
+	s.lastSavedText = text
 	s.savedPath = path
 }
 
