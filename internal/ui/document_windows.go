@@ -26,6 +26,7 @@ const (
 	titleTextGapDIP      = 10
 	statusTextPaddingDIP = 12
 	onePixelDIP          = 1
+	imageCheckerSizeDIP  = 16
 )
 
 var (
@@ -39,6 +40,8 @@ var (
 	colorTextPrimary      = colorRef(31, 35, 40)
 	colorTextMuted        = colorRef(101, 109, 118)
 	colorAccent           = colorRef(33, 99, 188)
+	colorCheckerLight     = colorRef(247, 248, 250)
+	colorCheckerDark      = colorRef(231, 234, 239)
 
 	documentRegistry = struct {
 		sync.RWMutex
@@ -77,6 +80,7 @@ type Document struct {
 	tracking   bool
 	cacheState string
 	destroyed  bool
+	image      imageRaster
 }
 
 var _ Window = (*Document)(nil)
@@ -85,7 +89,22 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 	if err := validateDocumentSnapshot(options.Snapshot); err != nil {
 		return nil, err
 	}
-	if options.Snapshot.Kind != core.KindText {
+	var saveState *core.SaveState
+	var raster imageRaster
+	switch options.Snapshot.Kind {
+	case core.KindText:
+		saveState = core.NewSaveState(options.Snapshot.Text)
+	case core.KindImage:
+		if options.Snapshot.Image == nil {
+			return nil, fmt.Errorf("create image document: decoded image is nil")
+		}
+		var err error
+		raster, err = rasterizeImage(options.Snapshot.Image)
+		if err != nil {
+			return nil, fmt.Errorf("create image document: %w", err)
+		}
+		saveState = core.NewReadOnlySaveState()
+	default:
 		return nil, fmt.Errorf("create document: unsupported content kind %d", options.Snapshot.Kind)
 	}
 	class, err := registerNativeClass(documentWindowClass)
@@ -95,10 +114,11 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 
 	doc := &Document{
 		snapshot:   options.Snapshot,
-		saveState:  core.NewSaveState(options.Snapshot.Text),
+		saveState:  saveState,
 		save:       options.Save,
 		onDestroy:  options.OnDestroy,
 		cacheState: "等待缓存",
+		image:      raster,
 	}
 	doc.native.handler = doc
 
@@ -366,6 +386,9 @@ func (d *Document) paint(hdc win.HDC) error {
 		Bottom: int32(titleHeight),
 	}, border); err != nil {
 		return fmt.Errorf("paint titlebar border: %w", err)
+	}
+	if err := d.paintImageContent(hdc, width, height, titleHeight, scaleDIP(statusbarHeightDIP, dpi), dpi); err != nil {
+		return err
 	}
 
 	statusTop := height - statusHeight
@@ -749,6 +772,9 @@ func (d *Document) refreshTitle() {
 
 func (d *Document) title() string {
 	title := "ClipNote - 剪贴板文本"
+	if d.snapshot.Kind == core.KindImage {
+		title = "ClipNote - 剪贴板图片"
+	}
 	if d.saveState != nil && d.saveState.Dirty() {
 		title += " *"
 	}
@@ -756,11 +782,42 @@ func (d *Document) title() string {
 }
 
 func (d *Document) statusText() string {
-	content := fmt.Sprintf("文本 · %d 字符 · %s", utf8.RuneCountInString(d.saveState.Text()), d.cacheState)
+	var content string
+	switch d.snapshot.Kind {
+	case core.KindImage:
+		content = fmt.Sprintf(
+			"图片 · %d × %d · %s · %s",
+			d.image.Width,
+			d.image.Height,
+			formatByteSize(int64(len(d.image.Pixels))),
+			d.cacheState,
+		)
+	default:
+		content = fmt.Sprintf(
+			"文本 · %d 字符 · %s",
+			utf8.RuneCountInString(d.saveState.Text()),
+			d.cacheState,
+		)
+	}
 	if d.saveState.Path() != "" {
 		content += " · " + d.saveState.Path()
 	}
 	return content
+}
+
+func formatByteSize(bytes int64) string {
+	const (
+		kib = 1024
+		mib = 1024 * kib
+	)
+	switch {
+	case bytes >= mib:
+		return fmt.Sprintf("%.1f MiB", float64(bytes)/mib)
+	case bytes >= kib:
+		return fmt.Sprintf("%.1f KiB", float64(bytes)/kib)
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
 }
 
 func dispatchDocumentShortcut(msg *win.MSG) bool {

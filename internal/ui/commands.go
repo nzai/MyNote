@@ -11,6 +11,16 @@ const (
 	CommandClose
 )
 
+type TrayCommand uint16
+
+const (
+	TrayCommandNone TrayCommand = iota
+	TrayCommandOpen
+	TrayCommandOpenCache
+	TrayCommandClearCache
+	TrayCommandExit
+)
+
 func CommandFor(key co.VK, shift bool) Command {
 	switch key {
 	case co.VK_S:
