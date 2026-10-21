@@ -54,6 +54,33 @@ func TestAsyncSaveCancelKeepsDirtyState(t *testing.T) {
 	}
 }
 
+func TestAsyncSaveCancelRevokesDeferredClose(t *testing.T) {
+	document := newSaveTestDocument(func(ctx context.Context) (DocumentSaveResult, error) {
+		<-ctx.Done()
+		return DocumentSaveResult{}, ctx.Err()
+	})
+	document.saveState.SetText("edited")
+	document.closeAfterSave = true
+	closeCanceled := false
+	document.onCloseCanceled = func(*Document) {
+		closeCanceled = true
+	}
+
+	if !document.saveDocument(false) {
+		t.Fatal("expected save job to start")
+	}
+	document.saveCancel()
+	waitForSaveResult(t, document)
+	document.handleSaveCompletion()
+
+	if !closeCanceled {
+		t.Fatal("canceling a close-triggered save must revoke the exit intent")
+	}
+	if document.closeAfterSave {
+		t.Fatal("deferred close must be cleared after save cancellation")
+	}
+}
+
 func newSaveTestDocument(run func(context.Context) (DocumentSaveResult, error)) *Document {
 	snapshot := core.Snapshot{CaptureID: "save-test", Kind: core.KindText}
 	return &Document{

@@ -70,13 +70,14 @@ type DocumentSaveJob struct {
 type DocumentSaveFunc func(parent win.HWND, saveAs bool) (DocumentSaveJob, error)
 
 type DocumentOptions struct {
-	Snapshot      core.Snapshot
-	Position      win.POINT
-	Save          DocumentSaveFunc
-	OnDestroy     func(*Document)
-	OnCancelCache func()
-	Logger        *slog.Logger
-	ProgressDelay time.Duration
+	Snapshot        core.Snapshot
+	Position        win.POINT
+	Save            DocumentSaveFunc
+	OnDestroy       func(*Document)
+	OnCloseCanceled func(*Document)
+	OnCancelCache   func()
+	Logger          *slog.Logger
+	ProgressDelay   time.Duration
 }
 
 type Window interface {
@@ -87,13 +88,14 @@ type Window interface {
 }
 
 type Document struct {
-	native      nativeWindowState
-	snapshot    core.Snapshot
-	saveState   *core.SaveState
-	save        DocumentSaveFunc
-	onDestroy   func(*Document)
-	cancelCache func()
-	logger      *slog.Logger
+	native          nativeWindowState
+	snapshot        core.Snapshot
+	saveState       *core.SaveState
+	save            DocumentSaveFunc
+	onDestroy       func(*Document)
+	onCloseCanceled func(*Document)
+	cancelCache     func()
+	logger          *slog.Logger
 
 	edit            win.HWND
 	fonts           documentFonts
@@ -152,15 +154,16 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 	}
 
 	doc := &Document{
-		snapshot:     options.Snapshot,
-		saveState:    saveState,
-		save:         options.Save,
-		onDestroy:    options.OnDestroy,
-		cancelCache:  options.OnCancelCache,
-		logger:       options.Logger,
-		cacheState:   "",
-		saveProgress: newProgressState(options.ProgressDelay),
-		image:        raster,
+		snapshot:        options.Snapshot,
+		saveState:       saveState,
+		save:            options.Save,
+		onDestroy:       options.OnDestroy,
+		onCloseCanceled: options.OnCloseCanceled,
+		cancelCache:     options.OnCancelCache,
+		logger:          options.Logger,
+		cacheState:      "",
+		saveProgress:    newProgressState(options.ProgressDelay),
+		image:           raster,
 	}
 	doc.native.handler = doc
 
@@ -223,10 +226,26 @@ func (d *Document) Show() {
 }
 
 func (d *Document) Close() {
+	_ = d.requestClose()
+}
+
+func (d *Document) requestClose() documentCloseDisposition {
 	if d.native.hwnd == 0 || d.destroyed {
-		return
+		return documentCloseDestroyed
+	}
+	if d.saveInProgress && d.saveState != nil && d.saveState.Dirty() {
+		// A tray exit may arrive while Ctrl+S is already running. Retain both
+		// intents so the window closes after that save reaches a terminal state.
+		d.closeAfterSave = true
 	}
 	_, _ = d.native.hwnd.SendMessage(co.WM_CLOSE, 0, 0)
+	if d.destroyed {
+		return documentCloseDestroyed
+	}
+	if d.closeAfterSave && d.saveInProgress {
+		return documentCloseDeferred
+	}
+	return documentCloseCanceled
 }
 
 func (d *Document) SetCacheStatus(status string) {
@@ -967,6 +986,8 @@ func (d *Document) handleSaveCompletion() {
 	d.saveProgress.Finish()
 	d.saveInProgress = false
 	d.saveCancelable = false
+	closeAfterSave := d.closeAfterSave
+	d.closeAfterSave = false
 
 	switch {
 	case completion.err != nil &&
@@ -999,8 +1020,10 @@ func (d *Document) handleSaveCompletion() {
 
 	d.refreshTitle()
 	_ = d.native.hwnd.InvalidateRect(nil, true)
-	if completion.err == nil && d.closeAfterSave {
-		d.closeAfterSave = false
+	if completion.err != nil && closeAfterSave {
+		d.notifyCloseCanceled()
+	}
+	if completion.err == nil && closeAfterSave {
 		_ = d.native.hwnd.PostMessage(co.WM_CLOSE, 0, 0)
 	}
 }
@@ -1021,6 +1044,7 @@ func (d *Document) confirmClose() bool {
 	)
 	if err != nil {
 		d.logError("show unsaved-changes prompt", err)
+		d.notifyCloseCanceled()
 		return false
 	}
 	switch answer {
@@ -1028,12 +1052,20 @@ func (d *Document) confirmClose() bool {
 		d.closeAfterSave = true
 		if !d.saveDocument(false) {
 			d.closeAfterSave = false
+			d.notifyCloseCanceled()
 		}
 		return false
 	case co.ID_NO:
 		return true
 	default:
+		d.notifyCloseCanceled()
 		return false
+	}
+}
+
+func (d *Document) notifyCloseCanceled() {
+	if d.onCloseCanceled != nil {
+		d.onCloseCanceled(d)
 	}
 }
 

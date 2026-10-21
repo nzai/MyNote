@@ -56,6 +56,52 @@ func TestTrayActionFor(t *testing.T) {
 	}
 }
 
+func TestExitCoordinatorWaitsForDeferredDocumentClose(t *testing.T) {
+	var exit exitCoordinator
+	destroyController := exit.closeBatch([]documentCloseDisposition{
+		documentCloseDestroyed,
+		documentCloseDeferred,
+	})
+	if destroyController {
+		t.Fatal("controller must stay alive while a document save is pending")
+	}
+	if !exit.pending {
+		t.Fatal("exit intent must be retained while the document closes")
+	}
+	if exit.documentDestroyed(1) {
+		t.Fatal("controller must stay alive while another document remains")
+	}
+	if !exit.documentDestroyed(0) {
+		t.Fatal("controller must exit after the last document closes")
+	}
+}
+
+func TestExitCoordinatorCancelsPendingExitWhenAnyDocumentStaysOpen(t *testing.T) {
+	var exit exitCoordinator
+	exit.closeBatch([]documentCloseDisposition{documentCloseDeferred})
+	exit.closeBatch([]documentCloseDisposition{documentCloseCanceled})
+	if exit.pending {
+		t.Fatal("a canceled close must revoke the pending exit")
+	}
+	if exit.documentDestroyed(0) {
+		t.Fatal("controller must not exit after a canceled close")
+	}
+}
+
+func TestExitCoordinatorCompletesImmediatelyWhenAllDocumentsClose(t *testing.T) {
+	var exit exitCoordinator
+	destroyController := exit.closeBatch([]documentCloseDisposition{
+		documentCloseDestroyed,
+		documentCloseDestroyed,
+	})
+	if !destroyController {
+		t.Fatal("controller must exit when every document is already closed")
+	}
+	if exit.pending {
+		t.Fatal("completed exit must not leave a pending intent")
+	}
+}
+
 func TestCreateControllerAndTray(t *testing.T) {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 smoke test")

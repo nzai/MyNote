@@ -68,6 +68,7 @@ type Controller struct {
 	cascade        int
 	progress       map[string]*cacheProgress
 	nextProgressID int
+	exit           exitCoordinator
 }
 
 type cacheProgress struct {
@@ -195,6 +196,9 @@ func (c *Controller) OpenCurrentClipboard() error {
 		OnDestroy: func(destroyed *Document) {
 			c.removeDocument(destroyed)
 		},
+		OnCloseCanceled: func(*Document) {
+			c.cancelExit()
+		},
 		OnCancelCache: func() {
 			c.cancelCache(snapshot.CaptureID)
 		},
@@ -267,7 +271,7 @@ func (c *Controller) handleNativeMessage(
 		c.handleTrayCommand(TrayCommand(uint16(wParam)))
 		return 0, true
 	case co.WM_CLOSE:
-		if !c.closeDocuments() {
+		if !c.exit.closeBatch(c.closeDocuments()) {
 			return 0, true
 		}
 		c.cancelAllCache()
@@ -385,7 +389,6 @@ func (c *Controller) notifyError(title string, err error) {
 
 func (c *Controller) removeDocument(document *Document) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for index, existing := range c.documents {
 		if existing == document {
 			c.documents = append(c.documents[:index], c.documents[index+1:]...)
@@ -402,21 +405,29 @@ func (c *Controller) removeDocument(document *Document) {
 		c.killProgressTimer(entry)
 		delete(c.progress, captureID)
 	}
+	exitNow := c.exit.documentDestroyed(len(c.documents))
+	c.mu.Unlock()
+
+	if exitNow {
+		_ = c.native.hwnd.PostMessage(co.WM_CLOSE, 0, 0)
+	}
 }
 
-func (c *Controller) closeDocuments() bool {
+func (c *Controller) closeDocuments() []documentCloseDisposition {
 	c.mu.Lock()
 	documents := append([]*Document(nil), c.documents...)
 	c.mu.Unlock()
+	results := make([]documentCloseDisposition, 0, len(documents))
 	for _, document := range documents {
-		document.Close()
+		results = append(results, document.requestClose())
 	}
-	for _, document := range documents {
-		if !document.destroyed {
-			return false
-		}
-	}
-	return true
+	return results
+}
+
+func (c *Controller) cancelExit() {
+	c.mu.Lock()
+	c.exit.cancel()
+	c.mu.Unlock()
 }
 
 func (c *Controller) documentPosition(index int) (win.POINT, error) {
