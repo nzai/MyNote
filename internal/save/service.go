@@ -27,6 +27,17 @@ type Writer interface {
 	Write(context.Context, string, core.Snapshot, string) error
 }
 
+type Prepared struct {
+	snapshot core.Snapshot
+	state    *core.SaveState
+	path     string
+	text     string
+}
+
+func (p Prepared) Path() string {
+	return p.path
+}
+
 type Service struct {
 	mu     sync.Mutex
 	dialog Dialog
@@ -118,11 +129,27 @@ func (s *Service) MarkSaved(path string) {
 }
 
 func (s *Service) save(ctx context.Context, parent uintptr, forceDialog bool) (string, error) {
+	prepared, err := s.Prepare(ctx, parent, forceDialog)
+	if err != nil {
+		return "", err
+	}
+	if err := s.WritePrepared(ctx, prepared); err != nil {
+		return "", err
+	}
+	s.CommitPrepared(prepared)
+	return prepared.path, nil
+}
+
+func (s *Service) Prepare(
+	ctx context.Context,
+	parent uintptr,
+	forceDialog bool,
+) (Prepared, error) {
 	if ctx == nil {
-		return "", errors.New("save service: context is nil")
+		return Prepared{}, errors.New("save service: context is nil")
 	}
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("save service: %w", err)
+		return Prepared{}, fmt.Errorf("save service: %w", err)
 	}
 
 	s.mu.Lock()
@@ -134,7 +161,7 @@ func (s *Service) save(ctx context.Context, parent uintptr, forceDialog bool) (s
 
 	if forceDialog || path == "" {
 		if s.dialog == nil {
-			return "", errors.New("save service: dialog is nil")
+			return Prepared{}, errors.New("save service: dialog is nil")
 		}
 		chosen, err := s.dialog.Choose(ctx, DialogOptions{
 			Parent:        parent,
@@ -144,28 +171,51 @@ func (s *Service) save(ctx context.Context, parent uintptr, forceDialog bool) (s
 		})
 		if err != nil {
 			if errors.Is(err, ErrCanceled) {
-				return "", ErrCanceled
+				return Prepared{}, ErrCanceled
 			}
-			return "", fmt.Errorf("choose save path for kind %d: %w", snapshot.Kind, err)
+			return Prepared{}, fmt.Errorf("choose save path for kind %d: %w", snapshot.Kind, err)
 		}
 		if chosen == "" {
-			return "", ErrCanceled
+			return Prepared{}, ErrCanceled
 		}
 		path = chosen
 	}
 	if s.writer == nil {
-		return "", errors.New("save service: writer is nil")
+		return Prepared{}, errors.New("save service: writer is nil")
 	}
-	if err := s.writer.Write(ctx, path, snapshot, text); err != nil {
-		return "", fmt.Errorf("write saved document %q: %w", path, err)
-	}
+	return Prepared{
+		snapshot: snapshot,
+		state:    state,
+		path:     path,
+		text:     text,
+	}, nil
+}
 
-	s.mu.Lock()
-	if s.state == state {
-		s.state.MarkSavedText(path, text)
+func (s *Service) WritePrepared(ctx context.Context, prepared Prepared) error {
+	if ctx == nil {
+		return errors.New("save service: context is nil")
 	}
-	s.mu.Unlock()
-	return path, nil
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("save service: %w", err)
+	}
+	if s.writer == nil {
+		return errors.New("save service: writer is nil")
+	}
+	if prepared.path == "" {
+		return errors.New("save service: prepared path is empty")
+	}
+	if err := s.writer.Write(ctx, prepared.path, prepared.snapshot, prepared.text); err != nil {
+		return fmt.Errorf("write saved document %q: %w", prepared.path, err)
+	}
+	return nil
+}
+
+func (s *Service) CommitPrepared(prepared Prepared) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == prepared.state {
+		s.state.MarkSavedText(prepared.path, prepared.text)
+	}
 }
 
 func suggestedName(kind core.Kind, at time.Time) string {

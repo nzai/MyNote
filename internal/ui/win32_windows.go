@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	documentWindowClass   = "ClipNote.Document"
-	controllerWindowClass = "ClipNote.Controller"
+	documentWindowClass       = "ClipNote.Document"
+	ControllerWindowClassName = "ClipNote.Controller"
+	controllerWindowClass     = ControllerWindowClassName
 )
 
 var (

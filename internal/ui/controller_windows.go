@@ -6,10 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/nzai/MyNote/internal/core"
+	"github.com/nzai/MyNote/internal/save"
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/win"
 )
@@ -18,12 +20,16 @@ const (
 	cascadeStartDIP = 40
 	cascadeStepDIP  = 24
 
-	cacheClearTimeout = 30 * time.Second
+	cacheClearTimeout    = 30 * time.Second
+	defaultProgressDelay = 3 * time.Second
+	OpenClipboardSignal  = co.WM_APP + 987
 )
 
 type ClipboardReader interface {
 	Read(context.Context) (core.Snapshot, error)
 }
+
+type ClipboardReaderFactory func(win.HWND) ClipboardReader
 
 type CacheEnqueuer interface {
 	Enqueue(context.Context, core.Snapshot) func()
@@ -31,30 +37,44 @@ type CacheEnqueuer interface {
 
 type DocumentSaveService interface {
 	SetText(string)
-	Save(context.Context, uintptr) (string, error)
-	SaveAs(context.Context, uintptr) (string, error)
+	Prepare(context.Context, uintptr, bool) (save.Prepared, error)
+	WritePrepared(context.Context, save.Prepared) error
+	CommitPrepared(save.Prepared)
 }
 
 type SaveFactory func(core.Snapshot) DocumentSaveService
 
 type ControllerOptions struct {
-	Reader       ClipboardReader
-	Cache        CacheEnqueuer
-	SaveFactory  SaveFactory
-	OpenCacheDir func() error
-	ClearCache   func(context.Context) error
-	Icon         win.HICON
+	Reader        ClipboardReader
+	ReaderFactory ClipboardReaderFactory
+	Cache         CacheEnqueuer
+	CacheEvents   *CacheEventSink
+	SaveFactory   SaveFactory
+	OpenCacheDir  func() error
+	ClearCache    func(context.Context) error
+	Icon          win.HICON
+	ProgressDelay time.Duration
+	Logger        *slog.Logger
 }
 
 type Controller struct {
 	native nativeWindowState
 	tray   *Tray
 	opts   ControllerOptions
+	reader ClipboardReader
 
-	mu        sync.Mutex
-	documents []*Document
-	cascade   int
-	cancels   map[string]func()
+	mu             sync.Mutex
+	documents      []*Document
+	cascade        int
+	progress       map[string]*cacheProgress
+	nextProgressID int
+}
+
+type cacheProgress struct {
+	document *Document
+	cancel   func()
+	timerID  int
+	state    progressState
 }
 
 func NewController(options ControllerOptions) (*Controller, error) {
@@ -65,13 +85,17 @@ func NewController(options ControllerOptions) (*Controller, error) {
 		}
 		options.Icon = icon
 	}
+	if options.ProgressDelay <= 0 {
+		options.ProgressDelay = defaultProgressDelay
+	}
 	class, err := registerNativeClass(controllerWindowClass)
 	if err != nil {
 		return nil, err
 	}
 	controller := &Controller{
-		opts:    options,
-		cancels: make(map[string]func()),
+		opts:           options,
+		progress:       make(map[string]*cacheProgress),
+		nextProgressID: 1,
 	}
 	controller.native.handler = controller
 	hwnd, err := createNativeWindow(
@@ -88,6 +112,12 @@ func NewController(options ControllerOptions) (*Controller, error) {
 		return nil, err
 	}
 	controller.native.hwnd = hwnd
+	if options.CacheEvents != nil {
+		if err := options.CacheEvents.Bind(hwnd); err != nil {
+			_ = hwnd.DestroyWindow()
+			return nil, err
+		}
+	}
 
 	tray, err := NewTray(hwnd, options.Icon)
 	if err != nil {
@@ -114,13 +144,30 @@ func (c *Controller) Close() {
 }
 
 func (c *Controller) OpenCurrentClipboard() error {
-	if c.opts.Reader == nil {
+	reader := c.opts.Reader
+	if reader == nil {
+		reader = c.reader
+	}
+	if reader == nil && c.opts.ReaderFactory != nil {
+		reader = c.opts.ReaderFactory(c.native.hwnd)
+		c.reader = reader
+	}
+	if reader == nil {
 		return errors.New("打开剪贴板失败：剪贴板读取器未配置")
 	}
-	snapshot, err := c.opts.Reader.Read(context.Background())
+	readStarted := time.Now()
+	snapshot, err := reader.Read(context.Background())
 	if err != nil {
 		return fmt.Errorf("读取当前剪贴板：%w", err)
 	}
+	c.logger().Debug(
+		"clipboard snapshot captured",
+		"capture_id", snapshot.CaptureID,
+		"kind", snapshot.Kind,
+		"format", snapshot.SourceFormat,
+		"bytes", snapshotBytes(snapshot),
+		"duration", time.Since(readStarted),
+	)
 
 	c.mu.Lock()
 	if len(c.documents) == 0 {
@@ -141,19 +188,37 @@ func (c *Controller) OpenCurrentClipboard() error {
 		saveService = c.opts.SaveFactory(snapshot)
 	}
 	options := DocumentOptions{
-		Snapshot: snapshot,
-		Position: position,
+		Snapshot:      snapshot,
+		Position:      position,
+		Logger:        c.opts.Logger,
+		ProgressDelay: c.opts.ProgressDelay,
 		OnDestroy: func(destroyed *Document) {
 			c.removeDocument(destroyed)
 		},
+		OnCancelCache: func() {
+			c.cancelCache(snapshot.CaptureID)
+		},
 	}
 	if saveService != nil {
-		options.Save = func(parent win.HWND, saveAs bool) (string, error) {
-			saveService.SetText(document.SaveState().Text())
-			if saveAs {
-				return saveService.SaveAs(context.Background(), uintptr(parent))
+		options.Save = func(parent win.HWND, saveAs bool) (DocumentSaveJob, error) {
+			text := document.SaveState().Text()
+			saveService.SetText(text)
+			prepared, err := saveService.Prepare(context.Background(), uintptr(parent), saveAs)
+			if err != nil {
+				return DocumentSaveJob{}, err
 			}
-			return saveService.Save(context.Background(), uintptr(parent))
+			return DocumentSaveJob{
+				Run: func(ctx context.Context) (DocumentSaveResult, error) {
+					if err := saveService.WritePrepared(ctx, prepared); err != nil {
+						return DocumentSaveResult{}, err
+					}
+					saveService.CommitPrepared(prepared)
+					return DocumentSaveResult{
+						Path: prepared.Path(),
+						Text: text,
+					}, nil
+				},
+			}, nil
 		}
 	}
 	document, err = NewDocument(options)
@@ -167,15 +232,16 @@ func (c *Controller) OpenCurrentClipboard() error {
 
 	// Showing and painting come first; the cache queue is deliberately touched
 	// only after Show returns so disk I/O can never gate the first frame.
+	showStarted := time.Now()
 	document.Show()
-	if c.opts.Cache != nil {
-		cancel := c.opts.Cache.Enqueue(context.Background(), snapshot)
-		if cancel != nil {
-			c.mu.Lock()
-			c.cancels[snapshot.CaptureID] = cancel
-			c.mu.Unlock()
-		}
-	}
+	c.logger().Debug(
+		"document window shown",
+		"capture_id", snapshot.CaptureID,
+		"kind", snapshot.Kind,
+		"window_show_duration", time.Since(showStarted),
+		"open_duration", time.Since(readStarted),
+	)
+	c.startCache(snapshot, document)
 	return nil
 }
 
@@ -188,12 +254,25 @@ func (c *Controller) handleNativeMessage(
 	case trayCallbackMessage:
 		c.handleTrayCallback(lParam)
 		return 0, true
+	case cacheEventMessage:
+		c.handleCacheEvents()
+		return 0, true
+	case co.WM_TIMER:
+		c.handleProgressTimer(int(wParam))
+		return 0, true
+	case OpenClipboardSignal:
+		c.openClipboardFromTray()
+		return 0, true
 	case co.WM_COMMAND:
 		c.handleTrayCommand(TrayCommand(uint16(wParam)))
 		return 0, true
 	case co.WM_CLOSE:
-		c.closeDocuments()
+		if !c.closeDocuments() {
+			return 0, true
+		}
+		c.cancelAllCache()
 		if err := c.native.hwnd.DestroyWindow(); err != nil {
+			c.logError("destroy controller window", err)
 			_, _ = c.native.hwnd.MessageBox(
 				err.Error(),
 				"退出 ClipNote 失败",
@@ -202,6 +281,10 @@ func (c *Controller) handleNativeMessage(
 		}
 		return 0, true
 	case co.WM_NCDESTROY:
+		c.cancelAllCache()
+		if c.opts.CacheEvents != nil {
+			c.opts.CacheEvents.Close()
+		}
 		if c.tray != nil {
 			// Windows removes stale tray icons when the process exits, so a
 			// failure here must not block shutdown.
@@ -220,11 +303,13 @@ func (c *Controller) handleTrayCallback(lParam win.LPARAM) {
 	case trayActionMenu:
 		command, err := c.tray.ShowMenu()
 		if err != nil {
+			c.logError("show tray menu", err)
 			c.notifyError("菜单打开失败", err)
 			return
 		}
 		if command != TrayCommandNone {
 			if err := c.native.hwnd.PostMessage(co.WM_COMMAND, win.WPARAM(command), 0); err != nil {
+				c.logError("dispatch tray command", err)
 				c.notifyError("托盘命令分发失败", err)
 			}
 		}
@@ -237,10 +322,12 @@ func (c *Controller) handleTrayCommand(command TrayCommand) {
 		c.openClipboardFromTray()
 	case TrayCommandOpenCache:
 		if c.opts.OpenCacheDir == nil {
+			c.logError("open cache directory", errors.New("cache directory callback is not configured"))
 			c.notifyError("无法打开缓存", errors.New("未配置缓存目录"))
 			return
 		}
 		if err := c.opts.OpenCacheDir(); err != nil {
+			c.logError("open cache directory", err)
 			c.notifyError("无法打开缓存目录", err)
 		}
 	case TrayCommandClearCache:
@@ -252,12 +339,14 @@ func (c *Controller) handleTrayCommand(command TrayCommand) {
 
 func (c *Controller) openClipboardFromTray() {
 	if err := c.OpenCurrentClipboard(); err != nil {
+		c.logError("open current clipboard", err)
 		c.notifyError("无法打开剪贴板", err)
 	}
 }
 
 func (c *Controller) clearCache() {
 	if c.opts.ClearCache == nil {
+		c.logError("clear cache", errors.New("cache store callback is not configured"))
 		c.notifyError("无法清空缓存", errors.New("未配置缓存存储"))
 		return
 	}
@@ -267,6 +356,7 @@ func (c *Controller) clearCache() {
 		co.MB_YESNO|co.MB_ICONWARNING|co.MB_DEFBUTTON2,
 	)
 	if err != nil {
+		c.logError("confirm clear cache", err)
 		c.notifyError("确认清空缓存失败", err)
 		return
 	}
@@ -276,10 +366,12 @@ func (c *Controller) clearCache() {
 	ctx, cancel := context.WithTimeout(context.Background(), cacheClearTimeout)
 	defer cancel()
 	if err := c.opts.ClearCache(ctx); err != nil {
+		c.logError("clear cache", err)
 		c.notifyError("清空缓存失败", err)
 		return
 	}
 	if err := c.tray.Notify("ClipNote", "临时缓存已清空。", false); err != nil {
+		c.logError("show cache-cleared notification", err)
 		c.notifyError("显示清空结果失败", err)
 	}
 }
@@ -303,15 +395,28 @@ func (c *Controller) removeDocument(document *Document) {
 	if len(c.documents) == 0 {
 		c.cascade = 0
 	}
+	for captureID, entry := range c.progress {
+		if entry.document != document {
+			continue
+		}
+		c.killProgressTimer(entry)
+		delete(c.progress, captureID)
+	}
 }
 
-func (c *Controller) closeDocuments() {
+func (c *Controller) closeDocuments() bool {
 	c.mu.Lock()
 	documents := append([]*Document(nil), c.documents...)
 	c.mu.Unlock()
 	for _, document := range documents {
 		document.Close()
 	}
+	for _, document := range documents {
+		if !document.destroyed {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Controller) documentPosition(index int) (win.POINT, error) {
@@ -373,4 +478,145 @@ func cascadePosition(work win.RECT, width, height, dpi, index int) win.POINT {
 		X: int32(startX + step*index),
 		Y: int32(startY + step*index),
 	}
+}
+
+func (c *Controller) startCache(snapshot core.Snapshot, document *Document) {
+	if c.opts.Cache == nil {
+		document.SetCacheStatus("未启用缓存")
+		return
+	}
+
+	cancel := c.opts.Cache.Enqueue(context.Background(), snapshot)
+	entry := &cacheProgress{
+		document: document,
+		cancel:   cancel,
+		state:    newProgressState(c.opts.ProgressDelay),
+	}
+	timerID := c.nextProgressID
+	c.nextProgressID++
+	if c.nextProgressID <= 0 {
+		c.nextProgressID = 1
+	}
+	entry.timerID = timerID
+	entry.state.Start(time.Now())
+	c.progress[snapshot.CaptureID] = entry
+
+	delayMS := int(c.opts.ProgressDelay / time.Millisecond)
+	if delayMS < 1 {
+		delayMS = 1
+	}
+	if err := c.native.hwnd.SetTimer(timerID, delayMS); err != nil {
+		c.logError("schedule cache progress", err)
+		entry.timerID = 0
+		entry.state.Finish()
+		document.SetCacheProgress("正在写入缓存…")
+	}
+}
+
+func (c *Controller) handleProgressTimer(timerID int) {
+	var entry *cacheProgress
+	for _, candidate := range c.progress {
+		if candidate.timerID == timerID {
+			entry = candidate
+			break
+		}
+	}
+	if entry == nil {
+		_ = c.native.hwnd.KillTimer(timerID)
+		return
+	}
+	_ = c.native.hwnd.KillTimer(timerID)
+	entry.timerID = 0
+	if !entry.state.Visible(time.Now()) {
+		remaining := entry.state.delay - time.Since(entry.state.started)
+		if remaining < time.Millisecond {
+			remaining = time.Millisecond
+		}
+		if err := c.native.hwnd.SetTimer(timerID, int(remaining/time.Millisecond)); err != nil {
+			c.logError("reschedule cache progress", err)
+			entry.state.Finish()
+			entry.document.SetCacheProgress("正在写入缓存…")
+		} else {
+			entry.timerID = timerID
+		}
+		return
+	}
+	entry.state.Finish()
+	entry.document.SetCacheProgress("正在写入缓存…")
+}
+
+func (c *Controller) handleCacheEvents() {
+	if c.opts.CacheEvents == nil {
+		return
+	}
+	for _, event := range c.opts.CacheEvents.Drain() {
+		entry := c.progress[event.ID]
+		if entry == nil {
+			continue
+		}
+		c.killProgressTimer(entry)
+		delete(c.progress, event.ID)
+
+		switch {
+		case event.Err != nil && event.Canceled:
+			entry.document.SetCacheStatus("缓存已取消")
+		case event.Err != nil:
+			c.logger().Error(
+				"cache clipboard snapshot",
+				"capture_id", event.ID,
+				"kind", entry.document.snapshot.Kind,
+				"bytes", snapshotBytes(entry.document.snapshot),
+				"duration", event.FinishedAt.Sub(event.StartedAt),
+				"error", event.Err,
+			)
+			entry.document.SetCacheStatus("缓存失败，详见日志")
+		default:
+			entry.document.SetCacheStatus("已缓存")
+		}
+	}
+}
+
+func (c *Controller) cancelCache(captureID string) {
+	entry := c.progress[captureID]
+	if entry == nil || entry.cancel == nil {
+		return
+	}
+	cancel := entry.cancel
+	entry.cancel = nil
+	cancel()
+}
+
+func (c *Controller) cancelAllCache() {
+	for captureID, entry := range c.progress {
+		c.killProgressTimer(entry)
+		if entry.cancel != nil {
+			entry.cancel()
+		}
+		delete(c.progress, captureID)
+	}
+}
+
+func (c *Controller) killProgressTimer(entry *cacheProgress) {
+	if entry != nil && entry.timerID != 0 {
+		_ = c.native.hwnd.KillTimer(entry.timerID)
+		entry.timerID = 0
+	}
+}
+
+func (c *Controller) logger() *slog.Logger {
+	if c.opts.Logger == nil {
+		return slog.Default()
+	}
+	return c.opts.Logger
+}
+
+func (c *Controller) logError(message string, err error) {
+	c.logger().Error(message, "error", err)
+}
+
+func snapshotBytes(snapshot core.Snapshot) int64 {
+	if snapshot.Kind == core.KindText {
+		return int64(len(snapshot.Text))
+	}
+	return int64(len(snapshot.DIB))
 }

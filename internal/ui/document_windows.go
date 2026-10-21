@@ -3,12 +3,16 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/nzai/MyNote/internal/core"
+	"github.com/nzai/MyNote/internal/save"
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/win"
 )
@@ -25,8 +29,11 @@ const (
 	appIconWidthDIP      = 16
 	titleTextGapDIP      = 10
 	statusTextPaddingDIP = 12
+	statusCancelWidthDIP = 56
 	onePixelDIP          = 1
 	imageCheckerSizeDIP  = 16
+	saveProgressTimerID  = 2
+	saveCompleteMessage  = co.WM_APP + 103
 )
 
 var (
@@ -51,13 +58,25 @@ var (
 	}
 )
 
-type DocumentSaveFunc func(parent win.HWND, saveAs bool) (string, error)
+type DocumentSaveResult struct {
+	Path string
+	Text string
+}
+
+type DocumentSaveJob struct {
+	Run func(context.Context) (DocumentSaveResult, error)
+}
+
+type DocumentSaveFunc func(parent win.HWND, saveAs bool) (DocumentSaveJob, error)
 
 type DocumentOptions struct {
-	Snapshot  core.Snapshot
-	Position  win.POINT
-	Save      DocumentSaveFunc
-	OnDestroy func(*Document)
+	Snapshot      core.Snapshot
+	Position      win.POINT
+	Save          DocumentSaveFunc
+	OnDestroy     func(*Document)
+	OnCancelCache func()
+	Logger        *slog.Logger
+	ProgressDelay time.Duration
 }
 
 type Window interface {
@@ -68,19 +87,36 @@ type Window interface {
 }
 
 type Document struct {
-	native    nativeWindowState
-	snapshot  core.Snapshot
-	saveState *core.SaveState
-	save      DocumentSaveFunc
-	onDestroy func(*Document)
+	native      nativeWindowState
+	snapshot    core.Snapshot
+	saveState   *core.SaveState
+	save        DocumentSaveFunc
+	onDestroy   func(*Document)
+	cancelCache func()
+	logger      *slog.Logger
 
-	edit       win.HWND
-	fonts      documentFonts
-	hover      titlebarButton
-	tracking   bool
-	cacheState string
-	destroyed  bool
-	image      imageRaster
+	edit            win.HWND
+	fonts           documentFonts
+	hover           titlebarButton
+	tracking        bool
+	cacheState      string
+	cacheCancelable bool
+	saveStatus      string
+	saveCancelable  bool
+	saveInProgress  bool
+	saveProgress    progressState
+	saveCancel      context.CancelFunc
+	saveStarted     time.Time
+	closeAfterSave  bool
+	saveResultMu    sync.Mutex
+	saveResult      *saveCompletion
+	destroyed       bool
+	image           imageRaster
+}
+
+type saveCompletion struct {
+	result DocumentSaveResult
+	err    error
 }
 
 var _ Window = (*Document)(nil)
@@ -107,18 +143,24 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 	default:
 		return nil, fmt.Errorf("create document: unsupported content kind %d", options.Snapshot.Kind)
 	}
+	if options.ProgressDelay <= 0 {
+		options.ProgressDelay = 3 * time.Second
+	}
 	class, err := registerNativeClass(documentWindowClass)
 	if err != nil {
 		return nil, err
 	}
 
 	doc := &Document{
-		snapshot:   options.Snapshot,
-		saveState:  saveState,
-		save:       options.Save,
-		onDestroy:  options.OnDestroy,
-		cacheState: "等待缓存",
-		image:      raster,
+		snapshot:     options.Snapshot,
+		saveState:    saveState,
+		save:         options.Save,
+		onDestroy:    options.OnDestroy,
+		cancelCache:  options.OnCancelCache,
+		logger:       options.Logger,
+		cacheState:   "",
+		saveProgress: newProgressState(options.ProgressDelay),
+		image:        raster,
 	}
 	doc.native.handler = doc
 
@@ -189,6 +231,15 @@ func (d *Document) Close() {
 
 func (d *Document) SetCacheStatus(status string) {
 	d.cacheState = status
+	d.cacheCancelable = false
+	if d.native.hwnd != 0 {
+		_ = d.native.hwnd.InvalidateRect(nil, true)
+	}
+}
+
+func (d *Document) SetCacheProgress(status string) {
+	d.cacheState = status
+	d.cacheCancelable = true
 	if d.native.hwnd != 0 {
 		_ = d.native.hwnd.InvalidateRect(nil, true)
 	}
@@ -276,6 +327,15 @@ func (d *Document) handleNativeMessage(
 		_, _ = hdc.SetTextColor(colorTextPrimary)
 		_, _ = hdc.SetBkColor(colorWindowBackground)
 		return uintptr(brush), true
+	case co.WM_TIMER:
+		if int(wParam) != saveProgressTimerID {
+			return 0, false
+		}
+		d.handleSaveTimer()
+		return 0, true
+	case saveCompleteMessage:
+		d.handleSaveCompletion()
+		return 0, true
 	case co.WM_COMMAND:
 		d.handleCommand(wParam)
 		return 0, true
@@ -291,7 +351,11 @@ func (d *Document) handleNativeMessage(
 		_ = d.native.hwnd.InvalidateRect(nil, true)
 		return 0, true
 	case co.WM_CLOSE:
+		if !d.confirmClose() {
+			return 0, true
+		}
 		if err := d.native.hwnd.DestroyWindow(); err != nil {
+			d.logError("destroy document window", err)
 			_, _ = d.native.hwnd.MessageBox(err.Error(), "关闭窗口失败", co.MB_OK|co.MB_ICONERROR)
 		}
 		return 0, true
@@ -335,6 +399,7 @@ func (d *Document) handlePaint() (uintptr, bool) {
 	}
 	defer d.native.hwnd.EndPaint(&paint)
 	if err := d.paint(hdc); err != nil {
+		d.logError("paint document window", err)
 		return 0, false
 	}
 	return 0, true
@@ -527,24 +592,47 @@ func (d *Document) paintStatus(
 		return fmt.Errorf("set status bar text background mode: %w", err)
 	}
 	status := d.statusText()
-	return drawTextVerticallyCentered(
+	textRightPadding := scaleDIP(statusTextPaddingDIP, dpi)
+	if d.activityCancelable() {
+		textRightPadding += scaleDIP(statusCancelWidthDIP, dpi)
+	}
+	textWidth := width - scaleDIP(statusTextPaddingDIP, dpi) - textRightPadding
+	if textWidth < 0 {
+		textWidth = 0
+	}
+	if err := drawTextVerticallyCentered(
 		hdc,
 		win.POINT{
 			X: int32(scaleDIP(statusTextPaddingDIP, dpi)),
 			Y: int32(top),
 		},
 		win.SIZE{
-			Cx: int32(width - 2*scaleDIP(statusTextPaddingDIP, dpi)),
+			Cx: int32(textWidth),
 			Cy: int32(height),
 		},
-		fitText(
-			hdc,
-			status,
-			width-2*scaleDIP(statusTextPaddingDIP, dpi),
-			d.fonts.ui,
-		),
+		fitText(hdc, status, textWidth, d.fonts.ui),
 		d.fonts.ui,
 		colorTextMuted,
+	); err != nil {
+		return err
+	}
+	if !d.activityCancelable() {
+		return nil
+	}
+	rect := statusCancelRect(width, top, height, dpi)
+	return drawTextVerticallyCentered(
+		hdc,
+		win.POINT{
+			X: rect.Left,
+			Y: int32(top),
+		},
+		win.SIZE{
+			Cx: rect.Right - rect.Left,
+			Cy: int32(height),
+		},
+		"取消",
+		d.fonts.ui,
+		colorAccent,
 	)
 }
 
@@ -669,6 +757,7 @@ func (d *Document) handleCommand(wParam win.WPARAM) {
 	}
 	text, err := d.edit.GetWindowText()
 	if err != nil {
+		d.logError("read edited document text", err)
 		return
 	}
 	d.saveState.SetText(text)
@@ -679,10 +768,30 @@ func (d *Document) handleCommand(wParam win.WPARAM) {
 func (d *Document) handleClick(lParam win.LPARAM) {
 	width, height, err := clientSize(d.native.hwnd)
 	if err != nil {
+		d.logError("measure document window for click", err)
 		return
 	}
 	x, y := decodeMousePosition(uintptr(lParam))
-	switch titlebarButtonAt(width, height, dpiFor(d.native.hwnd), x, y) {
+	dpi := dpiFor(d.native.hwnd)
+	if d.activityCancelable() && statusCancelHit(width, height, dpi, x, y) {
+		if d.saveCancelable {
+			d.saveCancelable = false
+			d.saveStatus = "正在取消保存…"
+			if d.saveCancel != nil {
+				d.saveCancel()
+			}
+			_ = d.native.hwnd.InvalidateRect(nil, true)
+			return
+		}
+		d.cacheCancelable = false
+		d.cacheState = "正在取消缓存…"
+		if d.cancelCache != nil {
+			d.cancelCache()
+		}
+		_ = d.native.hwnd.InvalidateRect(nil, true)
+		return
+	}
+	switch titlebarButtonAt(width, height, dpi, x, y) {
 	case titlebarButtonSave:
 		shift, _ := win.GetKeyState(co.VK_SHIFT)
 		d.saveDocument(shift)
@@ -694,6 +803,7 @@ func (d *Document) handleClick(lParam win.LPARAM) {
 func (d *Document) handleMouseMove(lParam win.LPARAM) {
 	width, height, err := clientSize(d.native.hwnd)
 	if err != nil {
+		d.logError("measure document window for mouse move", err)
 		return
 	}
 	x, y := decodeMousePosition(uintptr(lParam))
@@ -722,6 +832,11 @@ func (d *Document) handleDestroyed() {
 		return
 	}
 	d.destroyed = true
+	_ = d.native.hwnd.KillTimer(saveProgressTimerID)
+	if d.saveCancel != nil {
+		d.saveCancel()
+		d.saveCancel = nil
+	}
 	documentRegistry.Lock()
 	delete(documentRegistry.documents, d.native.hwnd)
 	documentRegistry.Unlock()
@@ -730,27 +845,196 @@ func (d *Document) handleDestroyed() {
 	}
 }
 
-func (d *Document) saveDocument(saveAs bool) {
+func (d *Document) saveDocument(saveAs bool) bool {
+	if d.saveInProgress {
+		d.saveStatus = "正在保存，请稍候"
+		_ = d.native.hwnd.InvalidateRect(nil, true)
+		return false
+	}
 	if d.save == nil {
+		err := errors.New("document save service is not configured")
+		d.logError("save document", err)
 		_, _ = d.native.hwnd.MessageBox(
-			"当前窗口尚未连接保存服务。",
+			err.Error(),
 			"无法保存",
 			co.MB_OK|co.MB_ICONERROR,
 		)
-		return
+		return false
 	}
-	path, err := d.save(d.native.hwnd, saveAs)
+	job, err := d.save(d.native.hwnd, saveAs)
 	if err != nil {
+		if errors.Is(err, save.ErrCanceled) {
+			return false
+		}
+		d.logError("save document", err)
 		_, _ = d.native.hwnd.MessageBox(
 			fmt.Sprintf("%v\n\n文件未被修改。", err),
 			"保存失败",
 			co.MB_OK|co.MB_ICONERROR,
 		)
+		return false
+	}
+	if job.Run == nil {
+		err := errors.New("document save job has no run function")
+		d.logError("save document", err)
+		return false
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d.saveCancel = cancel
+	d.saveInProgress = true
+	d.saveStatus = ""
+	d.saveCancelable = false
+	d.saveStarted = time.Now()
+	delay := d.saveProgress.delay
+	d.saveProgress = newProgressState(delay)
+	d.saveProgress.Start(d.saveStarted)
+
+	delayMS := int(delay / time.Millisecond)
+	if delayMS < 1 {
+		delayMS = 1
+	}
+	if err := d.native.hwnd.SetTimer(saveProgressTimerID, delayMS); err != nil {
+		d.logError("schedule save progress", err)
+		d.saveProgress.Finish()
+		d.saveStatus = "正在保存…"
+		d.saveCancelable = true
+	}
+	_ = d.native.hwnd.InvalidateRect(nil, true)
+	go d.runSaveJob(ctx, job)
+	return true
+}
+
+func (d *Document) runSaveJob(ctx context.Context, job DocumentSaveJob) {
+	result, err := job.Run(ctx)
+	d.saveResultMu.Lock()
+	d.saveResult = &saveCompletion{result: result, err: err}
+	d.saveResultMu.Unlock()
+	if postErr := d.native.hwnd.PostMessage(saveCompleteMessage, 0, 0); postErr != nil {
+		if d.logger != nil {
+			d.logger.Error(
+				"post document-save completion",
+				"capture_id", d.snapshot.CaptureID,
+				"error", postErr,
+			)
+		}
+	}
+}
+
+func (d *Document) handleSaveTimer() {
+	if !d.saveInProgress {
+		_ = d.native.hwnd.KillTimer(saveProgressTimerID)
 		return
 	}
-	d.saveState.MarkSaved(path)
+	_ = d.native.hwnd.KillTimer(saveProgressTimerID)
+	if !d.saveProgress.Visible(time.Now()) {
+		remaining := d.saveProgress.delay - time.Since(d.saveProgress.started)
+		if remaining < time.Millisecond {
+			remaining = time.Millisecond
+		}
+		if err := d.native.hwnd.SetTimer(
+			saveProgressTimerID,
+			int(remaining/time.Millisecond),
+		); err != nil {
+			d.logError("reschedule save progress", err)
+			d.saveProgress.Finish()
+			d.saveStatus = "正在保存…"
+			d.saveCancelable = true
+			_ = d.native.hwnd.InvalidateRect(nil, true)
+		}
+		return
+	}
+	d.saveProgress.Finish()
+	d.saveStatus = "正在保存…"
+	d.saveCancelable = true
+	_ = d.native.hwnd.InvalidateRect(nil, true)
+}
+
+func (d *Document) handleSaveCompletion() {
+	d.saveResultMu.Lock()
+	completion := d.saveResult
+	d.saveResult = nil
+	d.saveResultMu.Unlock()
+	if completion == nil {
+		return
+	}
+
+	_ = d.native.hwnd.KillTimer(saveProgressTimerID)
+	if d.saveCancel != nil {
+		d.saveCancel()
+		d.saveCancel = nil
+	}
+	d.saveProgress.Finish()
+	d.saveInProgress = false
+	d.saveCancelable = false
+
+	switch {
+	case completion.err != nil &&
+		(errors.Is(completion.err, save.ErrCanceled) ||
+			errors.Is(completion.err, context.Canceled)):
+		d.saveStatus = "保存已取消"
+		d.closeAfterSave = false
+	case completion.err != nil:
+		d.saveStatus = "保存失败"
+		d.closeAfterSave = false
+		d.logError("save document", completion.err)
+		_, _ = d.native.hwnd.MessageBox(
+			fmt.Sprintf("%v\n\n文件未被修改。", completion.err),
+			"保存失败",
+			co.MB_OK|co.MB_ICONERROR,
+		)
+	default:
+		d.saveState.MarkSavedText(completion.result.Path, completion.result.Text)
+		d.saveStatus = "已保存"
+		if d.logger != nil {
+			d.logger.Info(
+				"document saved",
+				"capture_id", d.snapshot.CaptureID,
+				"kind", d.snapshot.Kind,
+				"path", completion.result.Path,
+				"duration", time.Since(d.saveStarted),
+			)
+		}
+	}
+
 	d.refreshTitle()
 	_ = d.native.hwnd.InvalidateRect(nil, true)
+	if completion.err == nil && d.closeAfterSave {
+		d.closeAfterSave = false
+		_ = d.native.hwnd.PostMessage(co.WM_CLOSE, 0, 0)
+	}
+}
+
+func (d *Document) confirmClose() bool {
+	if d.saveState == nil || !d.saveState.Dirty() {
+		return true
+	}
+	if d.saveInProgress {
+		d.saveStatus = "正在保存，请稍候"
+		_ = d.native.hwnd.InvalidateRect(nil, true)
+		return false
+	}
+	answer, err := d.native.hwnd.MessageBox(
+		"这篇剪贴板文本有未保存的修改。\n\n是否在关闭前保存？",
+		"未保存的修改",
+		co.MB_YESNOCANCEL|co.MB_ICONWARNING|co.MB_DEFBUTTON1,
+	)
+	if err != nil {
+		d.logError("show unsaved-changes prompt", err)
+		return false
+	}
+	switch answer {
+	case co.ID_YES:
+		d.closeAfterSave = true
+		if !d.saveDocument(false) {
+			d.closeAfterSave = false
+		}
+		return false
+	case co.ID_NO:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Document) executeCommand(command Command) {
@@ -761,6 +1045,17 @@ func (d *Document) executeCommand(command Command) {
 		d.saveDocument(true)
 	case CommandClose:
 		_ = d.native.hwnd.PostMessage(co.WM_CLOSE, 0, 0)
+	}
+}
+
+func (d *Document) logError(message string, err error) {
+	if d.logger != nil {
+		d.logger.Error(
+			message,
+			"capture_id", d.snapshot.CaptureID,
+			"kind", d.snapshot.Kind,
+			"error", err,
+		)
 	}
 }
 
@@ -786,23 +1081,31 @@ func (d *Document) statusText() string {
 	switch d.snapshot.Kind {
 	case core.KindImage:
 		content = fmt.Sprintf(
-			"图片 · %d × %d · %s · %s",
+			"图片 · %d × %d · %s",
 			d.image.Width,
 			d.image.Height,
 			formatByteSize(int64(len(d.image.Pixels))),
-			d.cacheState,
 		)
 	default:
 		content = fmt.Sprintf(
-			"文本 · %d 字符 · %s",
+			"文本 · %d 字符",
 			utf8.RuneCountInString(d.saveState.Text()),
-			d.cacheState,
 		)
+	}
+	if d.cacheState != "" {
+		content += " · " + d.cacheState
+	}
+	if d.saveStatus != "" {
+		content += " · " + d.saveStatus
 	}
 	if d.saveState.Path() != "" {
 		content += " · " + d.saveState.Path()
 	}
 	return content
+}
+
+func (d *Document) activityCancelable() bool {
+	return d.saveCancelable || (!d.saveInProgress && d.cacheCancelable)
 }
 
 func formatByteSize(bytes int64) string {
@@ -818,6 +1121,24 @@ func formatByteSize(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+func statusCancelRect(width, top, height, dpi int) win.RECT {
+	right := width - scaleDIP(statusTextPaddingDIP, dpi)
+	left := right - scaleDIP(statusCancelWidthDIP, dpi)
+	return win.RECT{
+		Left:   int32(left),
+		Top:    int32(top),
+		Right:  int32(right),
+		Bottom: int32(top + height),
+	}
+}
+
+func statusCancelHit(width, height, dpi, x, y int) bool {
+	statusHeight := scaleDIP(statusbarHeightDIP, dpi)
+	rect := statusCancelRect(width, height-statusHeight, statusHeight, dpi)
+	return x >= int(rect.Left) && x < int(rect.Right) &&
+		y >= int(rect.Top) && y < int(rect.Bottom)
 }
 
 func dispatchDocumentShortcut(msg *win.MSG) bool {

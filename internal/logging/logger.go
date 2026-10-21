@@ -28,6 +28,7 @@ type Factory struct {
 	defaultLevel slog.Level
 	debug        map[string]bool
 	closer       io.Closer
+	path         func() string
 }
 
 func New(options Options) (*Factory, error) {
@@ -58,6 +59,7 @@ func New(options Options) (*Factory, error) {
 
 	factory := NewWithWriter(writer, options.Level, debug)
 	factory.closer = writer
+	factory.path = writer.CurrentPath
 	return factory, nil
 }
 
@@ -92,4 +94,11 @@ func (f *Factory) Close() error {
 		return nil
 	}
 	return f.closer.Close()
+}
+
+func (f *Factory) LogPath() string {
+	if f == nil || f.path == nil {
+		return ""
+	}
+	return f.path()
 }

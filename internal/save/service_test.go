@@ -181,6 +181,32 @@ func TestServiceKeepsNewerEditsDirtyWhenSaveCompletes(t *testing.T) {
 	}
 }
 
+func TestPrepareDeferResWriteUntilRequested(t *testing.T) {
+	dialog := &fakeDialog{path: `C:\Temp\prepared.txt`}
+	writer := &fakeWriter{}
+	service := NewService(dialog, writer, fixedSaveClock)
+	service.SetText("prepared")
+
+	prepared, err := service.Prepare(context.Background(), 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writer.calls != 0 {
+		t.Fatalf("writer calls after prepare = %d, want 0", writer.calls)
+	}
+	if prepared.Path() != dialog.path {
+		t.Fatalf("prepared path = %q, want %q", prepared.Path(), dialog.path)
+	}
+
+	if err := service.WritePrepared(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	service.CommitPrepared(prepared)
+	if writer.calls != 1 || service.Dirty() {
+		t.Fatalf("writer calls = %d, dirty = %v", writer.calls, service.Dirty())
+	}
+}
+
 type fakeDialog struct {
 	path    string
 	err     error

@@ -149,6 +149,42 @@ func (s *Store) Clear(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) CleanupPartials(ctx context.Context) (int, error) {
+	if ctx == nil {
+		return 0, errors.New("cleanup partial cache directories: context is nil")
+	}
+	root, err := validateCacheRoot(s.root)
+	if err != nil {
+		return 0, fmt.Errorf("cleanup partial cache directories: %w", err)
+	}
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read cache root %q for partial cleanup: %w", root, err)
+	}
+
+	removed := 0
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".partial-") {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return removed, fmt.Errorf("cleanup partial cache directories: %w", err)
+		}
+		target := filepath.Join(root, entry.Name())
+		if err := ensureDirectChild(root, target); err != nil {
+			return removed, fmt.Errorf("cleanup partial cache entry %q: %w", entry.Name(), err)
+		}
+		if err := os.RemoveAll(target); err != nil {
+			return removed, fmt.Errorf("remove partial cache entry %q: %w", target, err)
+		}
+		removed++
+	}
+	return removed, nil
+}
+
 func (s *Store) scanRecords(
 	ctx context.Context,
 	root string,

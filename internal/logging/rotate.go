@@ -113,6 +113,16 @@ func (w *RotatingWriter) Close() error {
 	return nil
 }
 
+func (w *RotatingWriter) CurrentPath() string {
+	if w == nil || strings.TrimSpace(w.dir) == "" {
+		return ""
+	}
+	return filepath.Join(
+		w.dir,
+		w.prefix+"-"+w.now().Format(logTimeLayout)+".jsonl",
+	)
+}
+
 func (w *RotatingWriter) ensureCurrent() error {
 	date := w.now().Format(logTimeLayout)
 	if w.file != nil && w.currentDate == date {

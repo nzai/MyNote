@@ -61,6 +61,9 @@ func TestNewWritesScopedJSONLinesToDatedFile(t *testing.T) {
 	if entry["level"] != "DEBUG" || entry["msg"] != "visible" {
 		t.Fatalf("unexpected event: %#v", entry)
 	}
+	if got, want := factory.LogPath(), filepath.Join(dir, "clipnote-20261021.jsonl"); got != want {
+		t.Fatalf("log path = %q, want %q", got, want)
+	}
 }
 
 func TestRotatingWriterDoesNotRotateBelowSizeLimit(t *testing.T) {

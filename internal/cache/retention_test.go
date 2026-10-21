@@ -132,6 +132,31 @@ func TestClearRemovesOnlyDirectChildren(t *testing.T) {
 	}
 }
 
+func TestCleanupPartialsRemovesOnlyPartialDirectories(t *testing.T) {
+	root := t.TempDir()
+	partial := filepath.Join(root, ".partial-crashed")
+	if err := os.MkdirAll(partial, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	regular := filepath.Join(root, "keep.txt")
+	if err := os.WriteFile(regular, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore(Options{Root: root})
+	removed, err := store.CleanupPartials(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	assertMissing(t, partial)
+	if _, err := os.Stat(regular); err != nil {
+		t.Fatalf("regular cache-root file was removed: %v", err)
+	}
+}
+
 func TestClearRejectsEmptyRelativeAndVolumeRoots(t *testing.T) {
 	if err := NewStore(Options{Root: ""}).Clear(context.Background()); err == nil {
 		t.Fatal("empty cache root must be rejected")

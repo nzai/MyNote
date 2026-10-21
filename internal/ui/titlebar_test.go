@@ -75,3 +75,12 @@ func TestDecodeSignedMouseWord(t *testing.T) {
 		t.Fatalf("decodeMousePosition() = (%d, %d), want (-18, 18)", x, y)
 	}
 }
+
+func TestStatusCancelHitAt96DPI(t *testing.T) {
+	if !statusCancelHit(720, 520, 96, 700, 505) {
+		t.Fatal("expected status-bar cancel hit")
+	}
+	if statusCancelHit(720, 520, 96, 640, 505) {
+		t.Fatal("status text area must not trigger cancel")
+	}
+}

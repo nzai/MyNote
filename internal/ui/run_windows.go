@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/nzai/MyNote/assets"
 	"github.com/rodrigocfd/windigo/co"
@@ -14,12 +15,15 @@ import (
 )
 
 type Options struct {
-	Reader       ClipboardReader
-	Cache        CacheEnqueuer
-	SaveFactory  SaveFactory
-	OpenCacheDir func() error
-	ClearCache   func(context.Context) error
-	Logger       *slog.Logger
+	Reader        ClipboardReader
+	ReaderFactory ClipboardReaderFactory
+	Cache         CacheEnqueuer
+	CacheEvents   *CacheEventSink
+	SaveFactory   SaveFactory
+	OpenCacheDir  func() error
+	ClearCache    func(context.Context) error
+	ProgressDelay time.Duration
+	Logger        *slog.Logger
 }
 
 func Run(options Options) int {
@@ -35,12 +39,16 @@ func Run(options Options) int {
 		return 1
 	}
 	controller, err := NewController(ControllerOptions{
-		Reader:       options.Reader,
-		Cache:        options.Cache,
-		SaveFactory:  options.SaveFactory,
-		OpenCacheDir: options.OpenCacheDir,
-		ClearCache:   options.ClearCache,
-		Icon:         icon,
+		Reader:        options.Reader,
+		ReaderFactory: options.ReaderFactory,
+		Cache:         options.Cache,
+		CacheEvents:   options.CacheEvents,
+		SaveFactory:   options.SaveFactory,
+		OpenCacheDir:  options.OpenCacheDir,
+		ClearCache:    options.ClearCache,
+		Icon:          icon,
+		ProgressDelay: options.ProgressDelay,
+		Logger:        options.Logger,
 	})
 	if err != nil {
 		if iconOwned {
@@ -92,4 +100,8 @@ func showFatalUIError(err error) {
 		return
 	}
 	_, _ = win.HWND(0).MessageBox(fmt.Sprintf("%v", err), "ClipNote 错误", co.MB_OK|co.MB_ICONERROR)
+}
+
+func ShowFatalError(err error) {
+	showFatalUIError(err)
 }
