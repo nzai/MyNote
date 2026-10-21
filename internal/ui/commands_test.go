@@ -18,7 +18,8 @@ func TestCommandFor(t *testing.T) {
 		{name: "save", key: co.VK_S, want: CommandSave},
 		{name: "save as", key: co.VK_S, shift: true, want: CommandSaveAs},
 		{name: "close", key: co.VK_W, want: CommandClose},
-		{name: "unhandled", key: co.VK_A, want: CommandNone},
+		{name: "select all", key: co.VK_A, want: CommandSelectAll},
+		{name: "unhandled", key: co.VK_X, want: CommandNone},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

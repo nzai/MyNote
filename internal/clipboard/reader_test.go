@@ -43,8 +43,24 @@ func TestReaderCapturesUnicodeText(t *testing.T) {
 	}
 }
 
-func TestReaderReturnsUnsupportedForEmptyClipboard(t *testing.T) {
+func TestReaderReturnsBlankTextForEmptyClipboard(t *testing.T) {
 	reader := testReader(&fakeSession{})
+
+	got, err := reader.Read(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != core.KindText || got.Text != "" {
+		t.Fatalf("empty clipboard snapshot = %#v, want blank text", got)
+	}
+	if got.CaptureID == "" {
+		t.Fatal("empty clipboard snapshot must still receive a capture ID")
+	}
+}
+
+func TestReaderStillRejectsUnsupportedClipboardContent(t *testing.T) {
+	reader := testReader(&fakeSession{otherFormat: true})
+
 	_, err := reader.Read(context.Background())
 	if !errors.Is(err, core.ErrUnsupported) {
 		t.Fatalf("got %v, want ErrUnsupported", err)
@@ -238,15 +254,20 @@ func (o *fakeOpener) Open() (Session, error) {
 }
 
 type fakeSession struct {
-	data     map[core.Format][]byte
-	readErr  map[core.Format]error
-	closeErr error
-	closed   bool
+	data        map[core.Format][]byte
+	readErr     map[core.Format]error
+	otherFormat bool
+	closeErr    error
+	closed      bool
 }
 
 func (s *fakeSession) Available(format core.Format) bool {
 	_, ok := s.data[format]
 	return ok
+}
+
+func (s *fakeSession) HasAnyFormat() bool {
+	return len(s.data) > 0 || s.otherFormat
 }
 
 func (s *fakeSession) Read(format core.Format) ([]byte, error) {

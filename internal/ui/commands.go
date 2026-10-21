@@ -8,6 +8,7 @@ const (
 	CommandNone Command = iota
 	CommandSave
 	CommandSaveAs
+	CommandSelectAll
 	CommandClose
 )
 
@@ -23,6 +24,8 @@ const (
 
 func CommandFor(key co.VK, shift bool) Command {
 	switch key {
+	case co.VK_A:
+		return CommandSelectAll
 	case co.VK_S:
 		if shift {
 			return CommandSaveAs

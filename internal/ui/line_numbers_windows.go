@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"unicode/utf16"
 
 	"github.com/nzai/MyNote/internal/core"
@@ -18,6 +20,15 @@ const (
 	lineNumberGutterMinDIP     = 44
 	lineNumberGutterPaddingDIP = 8
 	lineNumberDigitWidthDIP    = 8
+	lineNumberEditSubclassID   = 1
+
+	wmMouseWheel co.WM = 0x020a
+)
+
+var editorLineEndings = strings.NewReplacer(
+	"\r\n", "\r\n",
+	"\r", "\r\n",
+	"\n", "\r\n",
 )
 
 type lineNumberRow struct {
@@ -25,21 +36,27 @@ type lineNumberRow struct {
 	y      int
 }
 
-// logicalLineStarts returns character offsets in the UTF-16 stream used by
-// the native EDIT control. Line endings are normalized to CRLF because the
-// control converts LF and lone CR when its text is set.
+var lineNumberEditSubclass = struct {
+	sync.Once
+	proc uintptr
+}{}
+
+// LF-only text makes the native EDIT control assign several logical lines to
+// the same pixel row, which also breaks hit-testing and selection.
+func normalizeEditorText(text string) string {
+	return editorLineEndings.Replace(text)
+}
+
+// logicalLineStarts returns character offsets in the UTF-16 stream stored by
+// the native EDIT control after line endings have been normalized to CRLF.
 func logicalLineStarts(text string) []int {
-	normalized := strings.ReplaceAll(text, "\r\n", "\n")
-	normalized = strings.ReplaceAll(normalized, "\r", "\n")
 	starts := []int{0}
 	offset := 0
-	for _, r := range normalized {
-		if r == '\n' {
-			offset += 2
-			starts = append(starts, offset)
-			continue
-		}
+	for _, r := range normalizeEditorText(text) {
 		offset += utf16.RuneLen(r)
+		if r == '\n' {
+			starts = append(starts, offset)
+		}
 	}
 	return starts
 }
@@ -185,6 +202,129 @@ func (d *Document) invalidateLineNumberGutter() {
 		dpi,
 	)
 	_ = d.native.hwnd.InvalidateRect(&rect, false)
+}
+
+func (d *Document) repaintLineNumberGutter() {
+	if d.snapshot.Kind != core.KindText || d.edit == 0 || d.native.hwnd == 0 {
+		return
+	}
+	width, height, err := clientSize(d.native.hwnd)
+	if err != nil {
+		d.logError("measure window for line-number repaint", err)
+		return
+	}
+	dpi := dpiFor(d.native.hwnd)
+	rect := d.lineNumberGutterRect(
+		width,
+		height,
+		scaleDIP(titlebarHeightDIP, dpi),
+		scaleDIP(statusbarHeightDIP, dpi),
+		dpi,
+	)
+	// The gutter lives on the parent while the native edit scrolls itself.
+	// Painting synchronously prevents the gutter from lagging behind the text.
+	if err := d.native.hwnd.RedrawWindow(
+		&rect,
+		0,
+		co.RDW_INVALIDATE|co.RDW_UPDATENOW,
+	); err != nil {
+		d.logError("repaint line-number gutter", err)
+	}
+}
+
+func (d *Document) installLineNumberRepaintHook() error {
+	if d.snapshot.Kind != core.KindText || d.edit == 0 {
+		return nil
+	}
+	win.InitCommonControls()
+	lineNumberEditSubclass.Do(func() {
+		lineNumberEditSubclass.proc = syscall.NewCallback(
+			lineNumberEditSubclassWindowProc,
+		)
+	})
+	// EN_VSCROLL is not emitted for every viewport change, including the
+	// repeated WM_VSCROLL messages produced while dragging the scrollbar.
+	if err := d.edit.SetWindowSubclass(
+		lineNumberEditSubclass.proc,
+		lineNumberEditSubclassID,
+		nil,
+	); err != nil {
+		return fmt.Errorf("install line-number scroll repaint hook: %w", err)
+	}
+	return nil
+}
+
+func lineNumberEditSubclassWindowProc(
+	hwnd win.HWND,
+	msg co.WM,
+	wParam win.WPARAM,
+	lParam win.LPARAM,
+	subclassID uintptr,
+	_ uintptr,
+) uintptr {
+	if msg == co.WM_NCDESTROY {
+		_ = hwnd.RemoveWindowSubclass(
+			lineNumberEditSubclass.proc,
+			uint32(subclassID),
+		)
+	}
+	result := hwnd.DefSubclassProc(msg, wParam, lParam)
+	if editorMessageMayMoveViewport(msg) {
+		if document := documentForEditor(hwnd); document != nil {
+			document.syncLineNumberGutterWithViewport()
+		}
+	}
+	return result
+}
+
+func editorMessageMayMoveViewport(msg co.WM) bool {
+	switch msg {
+	case co.EM_LINESCROLL,
+		co.EM_SCROLLCARET,
+		co.EM_SETSEL,
+		co.WM_VSCROLL,
+		co.WM_KEYDOWN,
+		co.WM_CHAR,
+		co.WM_LBUTTONDOWN,
+		co.WM_LBUTTONDBLCLK,
+		co.WM_PAINT,
+		co.WM_PASTE,
+		co.WM_CUT,
+		co.WM_CLEAR,
+		co.WM_SIZE,
+		co.WM_SETTEXT,
+		wmMouseWheel:
+		return true
+	default:
+		return false
+	}
+}
+
+func documentForEditor(editor win.HWND) *Document {
+	parent, err := editor.GetParent()
+	if err != nil || parent == 0 {
+		return nil
+	}
+	documentRegistry.RLock()
+	defer documentRegistry.RUnlock()
+	return documentRegistry.documents[parent]
+}
+
+func (d *Document) syncLineNumberGutterWithViewport() {
+	if d.snapshot.Kind != core.KindText || d.edit == 0 {
+		return
+	}
+	firstVisible, err := d.edit.SendMessage(co.EM_GETFIRSTVISIBLELINE, 0, 0)
+	if err != nil {
+		d.logError("query first visible line after editor paint", err)
+		return
+	}
+	top := int(firstVisible)
+	if top == d.lineNumberFirstVisible {
+		return
+	}
+	d.lineNumberFirstVisible = top
+	d.repaintLineNumberGutter()
 }
 
 func (d *Document) paintLineNumberGutter(

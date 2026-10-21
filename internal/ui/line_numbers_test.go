@@ -56,6 +56,22 @@ func TestLineNumberGutterWidthGrowsWithDigits(t *testing.T) {
 	}
 }
 
+func TestEditorViewportMessagesTriggerLineNumberSync(t *testing.T) {
+	for _, message := range []co.WM{
+		co.EM_LINESCROLL,
+		co.WM_VSCROLL,
+		co.WM_KEYDOWN,
+		wmMouseWheel,
+	} {
+		if !editorMessageMayMoveViewport(message) {
+			t.Fatalf("message %#x must trigger line-number synchronization", uint32(message))
+		}
+	}
+	if editorMessageMayMoveViewport(co.EM_GETFIRSTVISIBLELINE) {
+		t.Fatal("line-number viewport query must not recursively trigger synchronization")
+	}
+}
+
 func TestTextDocumentUsesPreviewTitleAndLogicalLineNumbers(t *testing.T) {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 line-number test")
@@ -118,5 +134,84 @@ func TestTextDocumentUsesPreviewTitleAndLogicalLineNumbers(t *testing.T) {
 	}
 	if len(rows) == 0 || rows[0].number == 1 {
 		t.Fatalf("scrolled line-number rows = %+v, want a later logical line first", rows)
+	}
+}
+
+func TestVisibleLineNumbersKeepBlankLinesAfterWrappedText(t *testing.T) {
+	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
+		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 line-number test")
+	}
+	text := "**已完成**\n\n" +
+		"- 文本编辑框自动折行，不再出现横向滚动条；内容超高时才显示纵向滚动条。\n" +
+		"- 左侧增加行号，并与原始文本行对齐；自动折行的续行留空，不重复编号。\n" +
+		"- 滚动编辑框时，行号同步移动。\n" +
+		"- 窗口标题和任务栏标题改为内容预览：文本取前 32 个字符，超长加省略号；图片显示 `（图片） 1920 × 1080`；空文本显示 `（空文本）`。\n" +
+		"- 标题预览只在内容变化时计算，不会在每次重绘时扫描整段文本。"
+	document, err := NewDocument(DocumentOptions{
+		Snapshot: core.Snapshot{
+			CaptureID: "blank-line-number-test",
+			Kind:      core.KindText,
+			Text:      text,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = document.native.hwnd.ShowWindow(co.SW_HIDE)
+	defer func() {
+		_ = document.native.hwnd.DestroyWindow()
+	}()
+
+	rows, err := document.visibleLineNumberRows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]int, len(rows))
+	for index, row := range rows {
+		got[index] = row.number
+	}
+	want := []int{1, 2, 3, 4, 5, 6, 7}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("visible line numbers = %v, want %v (rows=%+v)", got, want, rows)
+	}
+	for index := 1; index < len(rows); index++ {
+		if rows[index].y <= rows[index-1].y {
+			t.Fatalf(
+				"logical line %d starts at y=%d, not after line %d at y=%d: %+v",
+				rows[index].number,
+				rows[index].y,
+				rows[index-1].number,
+				rows[index-1].y,
+				rows,
+			)
+		}
+	}
+}
+
+func TestTextDocumentLoadPreservesOriginalTextAndCleanState(t *testing.T) {
+	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
+		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 document load test")
+	}
+	text := "first\nsecond\n"
+	document, err := NewDocument(DocumentOptions{
+		Snapshot: core.Snapshot{
+			CaptureID: "document-load-test",
+			Kind:      core.KindText,
+			Text:      text,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = document.native.hwnd.ShowWindow(co.SW_HIDE)
+	defer func() {
+		_ = document.native.hwnd.DestroyWindow()
+	}()
+
+	if document.saveState.Text() != text {
+		t.Fatalf("loaded text = %q, want original %q", document.saveState.Text(), text)
+	}
+	if document.saveState.Dirty() {
+		t.Fatal("loading clipboard text must not mark the document dirty")
 	}
 }

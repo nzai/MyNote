@@ -22,6 +22,7 @@ var retryDelays = []time.Duration{
 
 type Session interface {
 	Available(core.Format) bool
+	HasAnyFormat() bool
 	Read(core.Format) ([]byte, error)
 	Close() error
 }
@@ -119,6 +120,12 @@ func (r *Reader) capture(ctx context.Context, session Session) (core.Snapshot, e
 		HasText:  session.Available(core.FormatText),
 		HasDIBV5: session.Available(core.FormatDIBV5),
 		HasDIB:   session.Available(core.FormatDIB),
+	}
+	if !formats.HasText && !formats.HasDIBV5 && !formats.HasDIB && !session.HasAnyFormat() {
+		return r.finishSnapshot(core.Snapshot{
+			Kind: core.KindText,
+			Text: "",
+		})
 	}
 	kind, source, err := core.ChooseFormat(formats)
 	if err != nil {

@@ -71,6 +71,7 @@ type DocumentSaveFunc func(parent win.HWND, saveAs bool) (DocumentSaveJob, error
 type DocumentOptions struct {
 	Snapshot        core.Snapshot
 	Position        win.POINT
+	Icon            win.HICON
 	Save            DocumentSaveFunc
 	OnDestroy       func(*Document)
 	OnCloseCanceled func(*Document)
@@ -96,28 +97,29 @@ type Document struct {
 	cancelCache     func()
 	logger          *slog.Logger
 
-	edit            win.HWND
-	fonts           documentFonts
-	lineStarts      []int
-	contentTitle    string
-	titleTextWidth  int
-	hover           titlebarButton
-	tracking        bool
-	cacheState      string
-	cacheCancelable bool
-	saveStatus      string
-	saveCancelable  bool
-	saveInProgress  bool
-	saveProgress    progressState
-	saveCancel      context.CancelFunc
-	saveStarted     time.Time
-	closeAfterSave  bool
-	saveResultMu    sync.Mutex
-	saveResult      *saveCompletion
-	destroyed       bool
-	image           imageRaster
-	scrollbars      scrollbarVisibility
-	updatingBars    bool
+	edit                   win.HWND
+	fonts                  documentFonts
+	lineStarts             []int
+	lineNumberFirstVisible int
+	contentTitle           string
+	titleTextWidth         int
+	hover                  titlebarButton
+	tracking               bool
+	cacheState             string
+	cacheCancelable        bool
+	saveStatus             string
+	saveCancelable         bool
+	saveInProgress         bool
+	saveProgress           progressState
+	saveCancel             context.CancelFunc
+	saveStarted            time.Time
+	closeAfterSave         bool
+	saveResultMu           sync.Mutex
+	saveResult             *saveCompletion
+	destroyed              bool
+	image                  imageRaster
+	scrollbars             scrollbarVisibility
+	updatingBars           bool
 }
 
 type saveCompletion struct {
@@ -152,22 +154,30 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 	if options.ProgressDelay <= 0 {
 		options.ProgressDelay = 3 * time.Second
 	}
+	if options.Icon == 0 {
+		icon, err := loadStockAppIcon()
+		if err != nil {
+			return nil, err
+		}
+		options.Icon = icon
+	}
 	class, err := registerNativeClass(documentWindowClass)
 	if err != nil {
 		return nil, err
 	}
 
 	doc := &Document{
-		snapshot:        options.Snapshot,
-		saveState:       saveState,
-		save:            options.Save,
-		onDestroy:       options.OnDestroy,
-		onCloseCanceled: options.OnCloseCanceled,
-		cancelCache:     options.OnCancelCache,
-		logger:          options.Logger,
-		cacheState:      "",
-		saveProgress:    newProgressState(options.ProgressDelay),
-		image:           raster,
+		snapshot:               options.Snapshot,
+		saveState:              saveState,
+		save:                   options.Save,
+		onDestroy:              options.OnDestroy,
+		onCloseCanceled:        options.OnCloseCanceled,
+		cancelCache:            options.OnCancelCache,
+		logger:                 options.Logger,
+		cacheState:             "",
+		saveProgress:           newProgressState(options.ProgressDelay),
+		image:                  raster,
+		lineNumberFirstVisible: -1,
 		scrollbars: scrollbarVisibility{
 			vertical: options.Snapshot.Kind == core.KindText,
 		},
@@ -201,6 +211,10 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 		return nil, err
 	}
 	doc.native.hwnd = hwnd
+	if err := applyWindowIcon(hwnd, options.Icon); err != nil {
+		_ = hwnd.DestroyWindow()
+		return nil, err
+	}
 	applyDocumentDwmAttributes(hwnd, doc.logger)
 
 	dpi := dpiFor(hwnd)
@@ -217,6 +231,19 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 	documentRegistry.documents[hwnd] = doc
 	documentRegistry.Unlock()
 	return doc, nil
+}
+
+func applyWindowIcon(hwnd win.HWND, icon win.HICON) error {
+	for _, size := range []co.ICON_SZ{co.ICON_SZ_SMALL, co.ICON_SZ_BIG} {
+		if _, err := hwnd.SendMessage(
+			co.WM_SETICON,
+			win.WPARAM(size),
+			win.LPARAM(icon),
+		); err != nil {
+			return fmt.Errorf("set window icon %d: %w", size, err)
+		}
+	}
+	return nil
 }
 
 func (d *Document) Hwnd() win.HWND {
@@ -306,7 +333,10 @@ func (d *Document) createEditor() error {
 		return fmt.Errorf("create document editor: %w", err)
 	}
 	d.edit = edit
-	if err := edit.SetWindowText(d.snapshot.Text); err != nil {
+	if err := d.installLineNumberRepaintHook(); err != nil {
+		return err
+	}
+	if err := edit.SetWindowText(normalizeEditorText(d.snapshot.Text)); err != nil {
 		return fmt.Errorf("set document editor text: %w", err)
 	}
 	if _, err := edit.SendMessage(co.WM_SETFONT, win.WPARAM(d.fonts.ui), 1); err != nil {
@@ -1173,6 +1203,10 @@ func (d *Document) executeCommand(command Command) {
 		d.saveDocument(false)
 	case CommandSaveAs:
 		d.saveDocument(true)
+	case CommandSelectAll:
+		if d.edit != 0 {
+			_, _ = d.edit.SendMessage(co.EM_SETSEL, 0, win.LPARAM(^uintptr(0)))
+		}
 	case CommandClose:
 		_ = d.native.hwnd.PostMessage(co.WM_CLOSE, 0, 0)
 	}

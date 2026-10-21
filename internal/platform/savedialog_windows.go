@@ -85,6 +85,9 @@ func (d *winSaveDialog) Choose(ctx context.Context, options save.DialogOptions) 
 
 	ok, err := dialog.Show(win.HWND(options.Parent))
 	if err != nil {
+		if isSaveDialogCanceled(err) {
+			return "", save.ErrCanceled
+		}
 		return "", fmt.Errorf("show Win32 save dialog: %w", err)
 	}
 	if !ok {
@@ -105,6 +108,17 @@ func (d *winSaveDialog) Choose(ctx context.Context, options save.DialogOptions) 
 		return "", save.ErrCanceled
 	}
 	return path, nil
+}
+
+func isSaveDialogCanceled(err error) bool {
+	if errors.Is(err, co.ERROR_CANCELLED) {
+		return true
+	}
+	// IFileDialog::Show returns HRESULT_FROM_WIN32(ERROR_CANCELLED), not the
+	// bare Win32 error code, when the user closes the dialog.
+	var hresult co.HRESULT
+	return errors.As(err, &hresult) &&
+		hresult == co.ERROR_CANCELLED.ToHresult()
 }
 
 func (d *winSaveDialog) initializeCOM() error {

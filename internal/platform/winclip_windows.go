@@ -17,8 +17,9 @@ type winClipboardOpener struct {
 }
 
 type winClipboardSession struct {
-	handle    win.HCLIPBOARD
-	available map[core.Format]bool
+	handle       win.HCLIPBOARD
+	available    map[core.Format]bool
+	hasAnyFormat bool
 }
 
 var (
@@ -51,11 +52,26 @@ func (o winClipboardOpener) Open() (clipboard.Session, error) {
 		}
 		available[format] = isAvailable
 	}
-	return &winClipboardSession{handle: handle, available: available}, nil
+	formatCount, err := handle.CountClipboardFormats()
+	if err != nil {
+		return nil, o.closeFailedOpen(
+			handle,
+			fmt.Errorf("count Win32 clipboard formats: %w", err),
+		)
+	}
+	return &winClipboardSession{
+		handle:       handle,
+		available:    available,
+		hasAnyFormat: formatCount > 0,
+	}, nil
 }
 
 func (s *winClipboardSession) Available(format core.Format) bool {
 	return s.available[format]
+}
+
+func (s *winClipboardSession) HasAnyFormat() bool {
+	return s.hasAnyFormat
 }
 
 func (s *winClipboardSession) Read(format core.Format) ([]byte, error) {

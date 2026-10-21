@@ -191,6 +191,7 @@ func (c *Controller) OpenCurrentClipboard() error {
 	options := DocumentOptions{
 		Snapshot:      snapshot,
 		Position:      position,
+		Icon:          c.opts.Icon,
 		Logger:        c.opts.Logger,
 		ProgressDelay: c.opts.ProgressDelay,
 		OnDestroy: func(destroyed *Document) {

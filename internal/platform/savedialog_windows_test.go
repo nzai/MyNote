@@ -1,9 +1,12 @@
 package platform
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/nzai/MyNote/internal/core"
+	"github.com/rodrigocfd/windigo/co"
 )
 
 func TestSaveDialogFilterMapping(t *testing.T) {
@@ -25,5 +28,22 @@ func TestSaveDialogFilterMapping(t *testing.T) {
 
 	if _, _, err := saveDialogFilter(core.Kind(99)); err == nil {
 		t.Fatal("unsupported kind must fail")
+	}
+}
+
+func TestSaveDialogCanceledHresultIsRecognized(t *testing.T) {
+	canceled := co.ERROR_CANCELLED.ToHresult()
+	for _, err := range []error{
+		canceled,
+		fmt.Errorf("show Win32 save dialog: %w", canceled),
+		co.ERROR_CANCELLED,
+	} {
+		if !isSaveDialogCanceled(err) {
+			t.Fatalf("error %v must be treated as save-dialog cancellation", err)
+		}
+	}
+
+	if isSaveDialogCanceled(errors.New("permission denied")) {
+		t.Fatal("ordinary save error must not be treated as cancellation")
 	}
 }
