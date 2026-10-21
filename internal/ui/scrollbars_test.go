@@ -55,7 +55,7 @@ func TestTextEditorShowsOnlyNeededScrollbars(t *testing.T) {
 	assertScrollbars(t, document, false, false)
 
 	setEditorText(document, strings.Repeat("x", 5000))
-	assertScrollbars(t, document, true, false)
+	assertScrollbars(t, document, false, true)
 
 	setEditorText(document, strings.Repeat("line\r\n", 200))
 	assertScrollbars(t, document, false, true)

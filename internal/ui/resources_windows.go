@@ -15,12 +15,14 @@ const (
 	uiFontPointSize    = 10
 	titleFontPointSize = 11
 	iconFontPointSize  = 13
+	lineFontPointSize  = 9
 )
 
 type documentFonts struct {
-	ui    win.HFONT
-	title win.HFONT
-	icon  win.HFONT
+	ui         win.HFONT
+	title      win.HFONT
+	icon       win.HFONT
+	lineNumber win.HFONT
 }
 
 var resourceCache = struct {
@@ -54,8 +56,20 @@ func fontsForDPI(dpi int) (documentFonts, error) {
 		_ = ui.DeleteObject()
 		return documentFonts{}, err
 	}
+	lineNumber, err := createUIFont(lineFontPointSize, dpi, "Consolas", int(co.FW_NORMAL))
+	if err != nil {
+		_ = icon.DeleteObject()
+		_ = title.DeleteObject()
+		_ = ui.DeleteObject()
+		return documentFonts{}, err
+	}
 
-	fonts := documentFonts{ui: ui, title: title, icon: icon}
+	fonts := documentFonts{
+		ui:         ui,
+		title:      title,
+		icon:       icon,
+		lineNumber: lineNumber,
+	}
 	resourceCache.fonts[dpi] = fonts
 	return fonts, nil
 }
@@ -117,6 +131,9 @@ func releaseUIResources() error {
 		}
 		if err := fonts.icon.DeleteObject(); err != nil {
 			failures = append(failures, fmt.Errorf("delete icon font for %d DPI: %w", dpi, err))
+		}
+		if err := fonts.lineNumber.DeleteObject(); err != nil {
+			failures = append(failures, fmt.Errorf("delete line-number font for %d DPI: %w", dpi, err))
 		}
 	}
 	for color, brush := range resourceCache.brushes {

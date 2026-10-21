@@ -44,6 +44,7 @@ var (
 	colorStatusbar        = colorRef(249, 250, 252)
 	colorTextPrimary      = colorRef(31, 35, 40)
 	colorTextMuted        = colorRef(101, 109, 118)
+	colorLineGutter       = colorRef(246, 247, 246)
 	colorAccent           = colorRef(33, 99, 188)
 	colorCheckerLight     = colorRef(247, 248, 250)
 	colorCheckerDark      = colorRef(231, 234, 239)
@@ -97,6 +98,8 @@ type Document struct {
 
 	edit            win.HWND
 	fonts           documentFonts
+	lineStarts      []int
+	contentTitle    string
 	titleTextWidth  int
 	hover           titlebarButton
 	tracking        bool
@@ -166,10 +169,18 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 		saveProgress:    newProgressState(options.ProgressDelay),
 		image:           raster,
 		scrollbars: scrollbarVisibility{
-			horizontal: options.Snapshot.Kind == core.KindText,
-			vertical:   options.Snapshot.Kind == core.KindText,
+			vertical: options.Snapshot.Kind == core.KindText,
 		},
 	}
+	if options.Snapshot.Kind == core.KindText {
+		doc.lineStarts = logicalLineStarts(options.Snapshot.Text)
+	}
+	doc.contentTitle = documentContentTitle(
+		doc.snapshot.Kind,
+		saveState.Text(),
+		raster.Width,
+		raster.Height,
+	)
 	doc.native.handler = doc
 
 	hwnd, err := createNativeWindow(
@@ -277,10 +288,8 @@ func (d *Document) createEditor() error {
 	if d.snapshot.Kind != core.KindText {
 		return nil
 	}
-	dpi := dpiFor(d.native.hwnd)
-	editStyle := co.WS_CHILD | co.WS_VISIBLE | co.WS_VSCROLL | co.WS_HSCROLL |
-		co.WS(co.ES_MULTILINE|co.ES_AUTOVSCROLL|co.ES_AUTOHSCROLL|
-			co.ES_WANTRETURN|co.ES_NOHIDESEL)
+	editStyle := co.WS_CHILD | co.WS_VISIBLE | co.WS_VSCROLL |
+		co.WS(co.ES_MULTILINE|co.ES_AUTOVSCROLL|co.ES_WANTRETURN|co.ES_NOHIDESEL)
 	edit, err := win.CreateWindowEx(
 		0,
 		win.ClassNameStr("EDIT"),
@@ -308,7 +317,6 @@ func (d *Document) createEditor() error {
 	d.updateScrollbars()
 	_ = d.native.hwnd.InvalidateRect(nil, true)
 	_ = d.native.hwnd.UpdateWindow()
-	_ = dpi
 	return nil
 }
 
@@ -498,6 +506,9 @@ func (d *Document) paint(hdc win.HDC) error {
 		Bottom: int32(titleHeight),
 	}, border); err != nil {
 		return fmt.Errorf("paint titlebar border: %w", err)
+	}
+	if err := d.paintLineNumberGutter(hdc, width, height, titleHeight, statusHeight, dpi); err != nil {
+		return err
 	}
 	if err := d.paintImageContent(hdc, width, height, titleHeight, scaleDIP(statusbarHeightDIP, dpi), dpi); err != nil {
 		return err
@@ -819,10 +830,15 @@ func (d *Document) layoutEditor() {
 	}
 	dpi := dpiFor(d.native.hwnd)
 	padding := scaleDIP(contentPaddingDIP, dpi)
+	gutterWidth := 0
+	if d.snapshot.Kind == core.KindText {
+		gutterWidth = d.lineNumberGutterWidth(dpi)
+	}
 	top := scaleDIP(titlebarHeightDIP, dpi)
 	bottom := scaleDIP(statusbarHeightDIP, dpi)
 	editHeight := height - top - bottom
-	editWidth := width - 2*padding
+	editLeft := padding + gutterWidth
+	editWidth := width - editLeft - padding
 	if editHeight < 0 {
 		editHeight = 0
 	}
@@ -830,7 +846,7 @@ func (d *Document) layoutEditor() {
 		editWidth = 0
 	}
 	_ = d.edit.MoveWindow(
-		win.POINT{X: int32(padding), Y: int32(top)},
+		win.POINT{X: int32(editLeft), Y: int32(top)},
 		win.SIZE{Cx: int32(editWidth), Cy: int32(editHeight)},
 		true,
 	)
@@ -839,7 +855,14 @@ func (d *Document) layoutEditor() {
 func (d *Document) handleCommand(wParam win.WPARAM) {
 	controlID := uint16(wParam)
 	notification := uint16(wParam >> 16)
-	if controlID != editControlID || notification != uint16(co.EN_CHANGE) {
+	if controlID != editControlID {
+		return
+	}
+	if notification == uint16(co.EN_VSCROLL) {
+		d.invalidateLineNumberGutter()
+		return
+	}
+	if notification != uint16(co.EN_CHANGE) {
 		return
 	}
 	text, err := d.edit.GetWindowText()
@@ -848,6 +871,9 @@ func (d *Document) handleCommand(wParam win.WPARAM) {
 		return
 	}
 	d.saveState.SetText(text)
+	d.lineStarts = logicalLineStarts(text)
+	d.contentTitle = documentContentTitle(core.KindText, text, 0, 0)
+	d.layoutEditor()
 	d.updateScrollbars()
 	d.refreshTitle()
 	_ = d.native.hwnd.InvalidateRect(nil, true)
@@ -1171,11 +1197,16 @@ func (d *Document) refreshTitle() {
 }
 
 func (d *Document) title() string {
-	title := "ClipNote - 剪贴板文本"
-	if d.snapshot.Kind == core.KindImage {
-		title = "ClipNote - 剪贴板图片"
+	title := d.contentTitle
+	if title == "" {
+		title = documentContentTitle(
+			d.snapshot.Kind,
+			d.saveState.Text(),
+			d.image.Width,
+			d.image.Height,
+		)
 	}
-	if d.saveState != nil && d.saveState.Dirty() {
+	if d.saveState.Dirty() {
 		title += " *"
 	}
 	return title

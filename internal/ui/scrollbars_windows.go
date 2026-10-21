@@ -9,7 +9,7 @@ import (
 	"github.com/rodrigocfd/windigo/win"
 )
 
-const scrollbarUpdatePasses = 4
+const scrollbarUpdatePasses = 3
 
 type scrollbarVisibility struct {
 	horizontal bool
@@ -28,15 +28,12 @@ func (d *Document) updateScrollbars() {
 		d.updatingBars = false
 	}()
 
-	// EDIT updates its scroll ranges only while a standard scroll bar is
-	// visible. Start from both bars so a text change is measured before the
-	// unneeded bars are hidden again.
-	visibility := scrollbarVisibility{horizontal: true, vertical: true}
+	// The editor wraps text, so only vertical scrolling can ever be needed.
+	visibility := scrollbarVisibility{vertical: true}
 	d.setScrollbarVisibility(visibility)
 	for pass := 0; pass < scrollbarUpdatePasses; pass++ {
 		next := scrollbarVisibility{
-			horizontal: d.scrollbarNeeded(co.SBB_HORZ),
-			vertical:   d.scrollbarNeeded(co.SBB_VERT),
+			vertical: d.scrollbarNeeded(co.SBB_VERT),
 		}
 		if next == visibility {
 			return
@@ -66,6 +63,7 @@ func scrollRangeExceedsPage(info win.SCROLLINFO) bool {
 }
 
 func (d *Document) setScrollbarVisibility(visibility scrollbarVisibility) {
+	visibility.horizontal = false
 	if d.scrollbars.horizontal != visibility.horizontal {
 		if err := d.edit.ShowScrollBar(co.SBB_HORZ, visibility.horizontal); err != nil {
 			d.logError("set horizontal scrollbar visibility", fmt.Errorf("show=%v: %w", visibility.horizontal, err))

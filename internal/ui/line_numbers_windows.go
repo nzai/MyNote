@@ -1,0 +1,273 @@
+//go:build windows
+
+package ui
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"unicode/utf16"
+
+	"github.com/nzai/MyNote/internal/core"
+	"github.com/rodrigocfd/windigo/co"
+	"github.com/rodrigocfd/windigo/win"
+)
+
+const (
+	lineNumberGutterMinDIP     = 44
+	lineNumberGutterPaddingDIP = 8
+	lineNumberDigitWidthDIP    = 8
+)
+
+type lineNumberRow struct {
+	number int
+	y      int
+}
+
+// logicalLineStarts returns character offsets in the UTF-16 stream used by
+// the native EDIT control. Line endings are normalized to CRLF because the
+// control converts LF and lone CR when its text is set.
+func logicalLineStarts(text string) []int {
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	starts := []int{0}
+	offset := 0
+	for _, r := range normalized {
+		if r == '\n' {
+			offset += 2
+			starts = append(starts, offset)
+			continue
+		}
+		offset += utf16.RuneLen(r)
+	}
+	return starts
+}
+
+func lineNumberGutterWidthDIP(lastLineNumber int) int {
+	if lastLineNumber < 1 {
+		lastLineNumber = 1
+	}
+	digits := len(strconv.Itoa(lastLineNumber))
+	width := 2*lineNumberGutterPaddingDIP + digits*lineNumberDigitWidthDIP
+	if width < lineNumberGutterMinDIP {
+		width = lineNumberGutterMinDIP
+	}
+	return width
+}
+
+func (d *Document) lineNumberGutterWidth(dpi int) int {
+	return scaleDIP(lineNumberGutterWidthDIP(len(d.lineStarts)), dpi)
+}
+
+func (d *Document) visibleLineNumberRows() ([]lineNumberRow, error) {
+	if d.edit == 0 || len(d.lineStarts) == 0 {
+		return nil, nil
+	}
+	client, err := d.edit.GetClientRect()
+	if err != nil {
+		return nil, fmt.Errorf("measure editor for line numbers: %w", err)
+	}
+	firstVisible, err := d.edit.SendMessage(co.EM_GETFIRSTVISIBLELINE, 0, 0)
+	if err != nil {
+		return nil, fmt.Errorf("query first visible editor line: %w", err)
+	}
+	firstChar, err := d.edit.SendMessage(
+		co.EM_LINEINDEX,
+		win.WPARAM(firstVisible),
+		0,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query first visible editor character: %w", err)
+	}
+	firstIndex := 0
+	if int64(firstChar) > 0 {
+		firstIndex = int(firstChar)
+	}
+	start := sort.SearchInts(d.lineStarts, firstIndex)
+	lineHeight := d.fontLineHeight()
+	if lineHeight < 1 {
+		lineHeight = 1
+	}
+	rows := make([]lineNumberRow, 0, int(client.Bottom)/lineHeight+2)
+	for index := start; index < len(d.lineStarts); index++ {
+		y, err := d.lineNumberY(d.lineStarts[index])
+		if err != nil {
+			return nil, err
+		}
+		if y >= int(client.Bottom) {
+			break
+		}
+		if y+lineHeight > 0 {
+			rows = append(rows, lineNumberRow{number: index + 1, y: y})
+		}
+	}
+	return rows, nil
+}
+
+func (d *Document) lineNumberY(charIndex int) (int, error) {
+	position, err := d.edit.SendMessage(
+		co.EM_POSFROMCHAR,
+		win.WPARAM(charIndex),
+		0,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("position logical line at character %d: %w", charIndex, err)
+	}
+	x, y := decodeMousePosition(position)
+	if x == -1 && y == -1 {
+		if charIndex > 0 && charIndex == d.lineStarts[len(d.lineStarts)-1] {
+			previousY, err := d.lineNumberY(charIndex - 1)
+			if err == nil {
+				lineHeight := d.fontLineHeight()
+				if lineHeight < 1 {
+					lineHeight = 1
+				}
+				return previousY + lineHeight, nil
+			}
+		}
+		return 0, fmt.Errorf("position logical line at character %d: edit returned no position", charIndex)
+	}
+	return y, nil
+}
+
+func (d *Document) fontLineHeight() int {
+	if d.edit == 0 {
+		return 0
+	}
+	hdc, err := d.edit.GetDC()
+	if err != nil {
+		return 0
+	}
+	defer func() {
+		_ = d.edit.ReleaseDC(hdc)
+	}()
+	oldFont, err := hdc.SelectObjectFont(d.fonts.lineNumber)
+	if err != nil {
+		return 0
+	}
+	defer func() {
+		_, _ = hdc.SelectObjectFont(oldFont)
+	}()
+	metrics, err := hdc.GetTextMetrics()
+	if err != nil {
+		return 0
+	}
+	return int(metrics.Height)
+}
+
+func (d *Document) lineNumberGutterRect(
+	width, height, titleHeight, statusHeight, dpi int,
+) win.RECT {
+	padding := scaleDIP(contentPaddingDIP, dpi)
+	return win.RECT{
+		Left:   int32(padding),
+		Top:    int32(titleHeight),
+		Right:  int32(padding + d.lineNumberGutterWidth(dpi)),
+		Bottom: int32(height - statusHeight),
+	}
+}
+
+func (d *Document) invalidateLineNumberGutter() {
+	if d.snapshot.Kind != core.KindText || d.edit == 0 || d.native.hwnd == 0 {
+		return
+	}
+	width, height, err := clientSize(d.native.hwnd)
+	if err != nil {
+		return
+	}
+	dpi := dpiFor(d.native.hwnd)
+	rect := d.lineNumberGutterRect(
+		width,
+		height,
+		scaleDIP(titlebarHeightDIP, dpi),
+		scaleDIP(statusbarHeightDIP, dpi),
+		dpi,
+	)
+	_ = d.native.hwnd.InvalidateRect(&rect, false)
+}
+
+func (d *Document) paintLineNumberGutter(
+	hdc win.HDC,
+	width, height, titleHeight, statusHeight, dpi int,
+) error {
+	if d.snapshot.Kind != core.KindText || d.edit == 0 {
+		return nil
+	}
+	rect := d.lineNumberGutterRect(width, height, titleHeight, statusHeight, dpi)
+	if rect.Right <= rect.Left || rect.Bottom <= rect.Top {
+		return nil
+	}
+	background, err := brushFor(colorLineGutter)
+	if err != nil {
+		return err
+	}
+	if err := hdc.FillRect(&rect, background); err != nil {
+		return fmt.Errorf("paint line-number gutter: %w", err)
+	}
+	border, err := brushFor(colorTitlebarBorder)
+	if err != nil {
+		return err
+	}
+	if err := hdc.FillRect(&win.RECT{
+		Left:   rect.Right - int32(scaleDIP(onePixelDIP, dpi)),
+		Top:    rect.Top,
+		Right:  rect.Right,
+		Bottom: rect.Bottom,
+	}, border); err != nil {
+		return fmt.Errorf("paint line-number separator: %w", err)
+	}
+
+	rows, err := d.visibleLineNumberRows()
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	saved, err := hdc.SaveDC()
+	if err != nil {
+		return fmt.Errorf("save line-number drawing state: %w", err)
+	}
+	defer func() {
+		_ = hdc.RestoreDC(saved)
+	}()
+	if _, err := hdc.IntersectClipRect(rect); err != nil {
+		return fmt.Errorf("clip line-number gutter: %w", err)
+	}
+	oldFont, err := hdc.SelectObjectFont(d.fonts.lineNumber)
+	if err != nil {
+		return fmt.Errorf("select line-number font: %w", err)
+	}
+	defer func() {
+		_, _ = hdc.SelectObjectFont(oldFont)
+	}()
+	if _, err := hdc.SetBkMode(co.BKMODE_TRANSPARENT); err != nil {
+		return fmt.Errorf("set line-number background mode: %w", err)
+	}
+	if _, err := hdc.SetTextColor(colorTextMuted); err != nil {
+		return fmt.Errorf("set line-number color: %w", err)
+	}
+	metrics, err := hdc.GetTextMetrics()
+	if err != nil {
+		return fmt.Errorf("measure line-number font: %w", err)
+	}
+	rightPadding := scaleDIP(lineNumberGutterPaddingDIP, dpi)
+	lineHeight := d.fontLineHeight()
+	if lineHeight < 1 {
+		lineHeight = int(metrics.Height)
+	}
+	for _, row := range rows {
+		label := strconv.Itoa(row.number)
+		extent, err := hdc.GetTextExtentPoint32(label)
+		if err != nil {
+			return fmt.Errorf("measure line number %d: %w", row.number, err)
+		}
+		x := int(rect.Right) - rightPadding - int(extent.Cx)
+		y := titleHeight + row.y + (lineHeight-int(metrics.Height))/2
+		if err := hdc.TextOut(x, y, label); err != nil {
+			return fmt.Errorf("paint line number %d: %w", row.number, err)
+		}
+	}
+	return nil
+}
