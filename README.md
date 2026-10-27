@@ -43,6 +43,13 @@ scripts\build.cmd
 
 默认生成 `bin\clipnote.exe`，使用 Windows GUI 子系统，启动时不会附带控制台窗口。
 
+EXE 在资源管理器、快捷方式和固定到任务栏时使用的图标来自 `cmd\clipnote\rsrc.syso`，该 PE 资源由 `assets\app.ico` 生成。更换 ICO 后在仓库根目录执行：
+
+```bat
+go generate ./cmd/clipnote
+scripts\build.cmd
+```
+
 生成带控制台的调试版本：
 
 ```bat
@@ -53,7 +60,7 @@ scripts\build.cmd -ConsoleBuild
 
 ```bat
 scripts\build.cmd -Output bin\clipnote-test.exe
-scripts\build.cmd -Version v1.0.0
+scripts\build.cmd -Version v1.0.1
 ```
 
 `-DebugBuild` 和 `-Debug` 是 `-ConsoleBuild` 的兼容别名。构建脚本会检查生成的 PE 子系统，GUI 和 console 类型不符合预期时会直接失败。

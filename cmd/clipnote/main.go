@@ -1,5 +1,7 @@
 package main
 
+//go:generate go run github.com/akavel/rsrc@v0.10.2 -arch amd64 -ico ../../assets/app.ico -o rsrc.syso
+
 import (
 	"context"
 	"crypto/rand"
@@ -32,7 +34,7 @@ const (
 	workerCloseTime    = 3 * time.Second
 )
 
-var version = "1.0.0-dev"
+var version = "1.0.1-dev"
 
 type cliOptions struct {
 	check       bool
