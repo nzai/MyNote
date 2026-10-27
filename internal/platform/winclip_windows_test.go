@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/nzai/MyNote/internal/core"
@@ -28,4 +29,41 @@ func TestWinClipboardFormatMapping(t *testing.T) {
 	if _, ok := winClipboardFormat(core.Format(99)); ok {
 		t.Fatal("unknown format should not map")
 	}
+}
+
+func TestClearOpenedClipboardEmptiesAndAlwaysCloses(t *testing.T) {
+	emptyErr := errors.New("empty failed")
+	closeErr := errors.New("close failed")
+	session := &fakeClipboardClearSession{
+		emptyErr: emptyErr,
+		closeErr: closeErr,
+	}
+
+	err := clearOpenedClipboard(session)
+	if !errors.Is(err, emptyErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("clear error = %v, want both empty and close errors", err)
+	}
+	if session.emptyCalls != 1 {
+		t.Fatalf("EmptyClipboard calls = %d, want 1", session.emptyCalls)
+	}
+	if session.closeCalls != 1 {
+		t.Fatalf("CloseClipboard calls = %d, want 1", session.closeCalls)
+	}
+}
+
+type fakeClipboardClearSession struct {
+	emptyErr   error
+	closeErr   error
+	emptyCalls int
+	closeCalls int
+}
+
+func (s *fakeClipboardClearSession) EmptyClipboard() error {
+	s.emptyCalls++
+	return s.emptyErr
+}
+
+func (s *fakeClipboardClearSession) CloseClipboard() error {
+	s.closeCalls++
+	return s.closeErr
 }

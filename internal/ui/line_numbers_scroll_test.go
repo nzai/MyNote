@@ -19,6 +19,7 @@ func TestEditorScrollRepaintsLineNumberGutter(t *testing.T) {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 line-number scroll test")
 	}
+	lockGUIThread(t)
 
 	text := strings.Repeat(
 		"this logical line is deliberately long enough to wrap across several visual rows "+

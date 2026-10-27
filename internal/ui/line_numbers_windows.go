@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"unicode/utf16"
 
-	"github.com/nzai/MyNote/internal/core"
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/win"
 )
@@ -50,15 +49,21 @@ func normalizeEditorText(text string) string {
 // logicalLineStarts returns character offsets in the UTF-16 stream stored by
 // the native EDIT control after line endings have been normalized to CRLF.
 func logicalLineStarts(text string) []int {
+	starts, _ := editorTextLayout(text)
+	return starts
+}
+
+func editorTextLayout(text string) ([]int, int) {
+	text = normalizeEditorText(text)
 	starts := []int{0}
 	offset := 0
-	for _, r := range normalizeEditorText(text) {
+	for _, r := range text {
 		offset += utf16.RuneLen(r)
 		if r == '\n' {
 			starts = append(starts, offset)
 		}
 	}
-	return starts
+	return starts, offset
 }
 
 func lineNumberGutterWidthDIP(lastLineNumber int) int {
@@ -74,11 +79,14 @@ func lineNumberGutterWidthDIP(lastLineNumber int) int {
 }
 
 func (d *Document) lineNumberGutterWidth(dpi int) int {
+	if !d.lineNumbersVisible() {
+		return 0
+	}
 	return scaleDIP(lineNumberGutterWidthDIP(len(d.lineStarts)), dpi)
 }
 
 func (d *Document) visibleLineNumberRows() ([]lineNumberRow, error) {
-	if d.edit == 0 || len(d.lineStarts) == 0 {
+	if !d.lineNumbersVisible() || len(d.lineStarts) == 0 {
 		return nil, nil
 	}
 	client, err := d.edit.GetClientRect()
@@ -123,6 +131,15 @@ func (d *Document) visibleLineNumberRows() ([]lineNumberRow, error) {
 }
 
 func (d *Document) lineNumberY(charIndex int) (int, error) {
+	index := sort.SearchInts(d.lineStarts, charIndex)
+	if index < len(d.lineStarts) && d.lineStarts[index] == charIndex &&
+		d.blankLogicalLine(index) {
+		return d.blankLineY(index)
+	}
+	return d.rawLineNumberY(charIndex)
+}
+
+func (d *Document) rawLineNumberY(charIndex int) (int, error) {
 	position, err := d.edit.SendMessage(
 		co.EM_POSFROMCHAR,
 		win.WPARAM(charIndex),
@@ -148,8 +165,55 @@ func (d *Document) lineNumberY(charIndex int) (int, error) {
 	return y, nil
 }
 
+func (d *Document) blankLogicalLine(index int) bool {
+	if index < 0 || index >= len(d.lineStarts) {
+		return false
+	}
+	start := d.lineStarts[index]
+	if index == len(d.lineStarts)-1 {
+		return start >= d.editorTextLength
+	}
+	// A blank logical line contains only the normalized CRLF delimiter.
+	return d.lineStarts[index+1]-start <= 2
+}
+
+func (d *Document) blankLineY(index int) (int, error) {
+	lineHeight := d.fontLineHeight()
+	if lineHeight < 1 {
+		lineHeight = 1
+	}
+	next := index + 1
+	for next < len(d.lineStarts) && d.blankLogicalLine(next) {
+		next++
+	}
+	if next < len(d.lineStarts) {
+		y, err := d.rawLineNumberY(d.lineStarts[next])
+		if err != nil {
+			return 0, err
+		}
+		return y - (next-index)*lineHeight, nil
+	}
+
+	previous := index - 1
+	for previous >= 0 && d.blankLogicalLine(previous) {
+		previous--
+	}
+	if previous < 0 {
+		return index * lineHeight, nil
+	}
+	contentEnd := d.lineStarts[previous+1] - 3
+	if contentEnd < d.lineStarts[previous] {
+		contentEnd = d.lineStarts[previous]
+	}
+	y, err := d.rawLineNumberY(contentEnd)
+	if err != nil {
+		return 0, err
+	}
+	return y + (index-previous)*lineHeight, nil
+}
+
 func (d *Document) fontLineHeight() int {
-	if d.edit == 0 {
+	if d.edit == 0 || d.editorFont == 0 {
 		return 0
 	}
 	hdc, err := d.edit.GetDC()
@@ -159,7 +223,7 @@ func (d *Document) fontLineHeight() int {
 	defer func() {
 		_ = d.edit.ReleaseDC(hdc)
 	}()
-	oldFont, err := hdc.SelectObjectFont(d.fonts.lineNumber)
+	oldFont, err := hdc.SelectObjectFont(d.editorFont)
 	if err != nil {
 		return 0
 	}
@@ -170,7 +234,11 @@ func (d *Document) fontLineHeight() int {
 	if err != nil {
 		return 0
 	}
-	return int(metrics.Height)
+	height := int(metrics.Height)
+	if d.editorSettings.LineSpacing > 100 {
+		height = height * d.editorSettings.LineSpacing / 100
+	}
+	return height
 }
 
 func (d *Document) lineNumberGutterRect(
@@ -178,7 +246,9 @@ func (d *Document) lineNumberGutterRect(
 ) win.RECT {
 	padding := scaleDIP(contentPaddingDIP, dpi)
 	return win.RECT{
-		Left:   int32(padding),
+		// Extend through the content inset so the gutter reaches the window
+		// edge; the edit control still starts after the inset.
+		Left:   0,
 		Top:    int32(titleHeight),
 		Right:  int32(padding + d.lineNumberGutterWidth(dpi)),
 		Bottom: int32(height - statusHeight),
@@ -186,7 +256,7 @@ func (d *Document) lineNumberGutterRect(
 }
 
 func (d *Document) invalidateLineNumberGutter() {
-	if d.snapshot.Kind != core.KindText || d.edit == 0 || d.native.hwnd == 0 {
+	if !d.lineNumbersVisible() || d.native.hwnd == 0 {
 		return
 	}
 	width, height, err := clientSize(d.native.hwnd)
@@ -205,7 +275,7 @@ func (d *Document) invalidateLineNumberGutter() {
 }
 
 func (d *Document) repaintLineNumberGutter() {
-	if d.snapshot.Kind != core.KindText || d.edit == 0 || d.native.hwnd == 0 {
+	if !d.lineNumbersVisible() || d.native.hwnd == 0 {
 		return
 	}
 	width, height, err := clientSize(d.native.hwnd)
@@ -233,7 +303,7 @@ func (d *Document) repaintLineNumberGutter() {
 }
 
 func (d *Document) installLineNumberRepaintHook() error {
-	if d.snapshot.Kind != core.KindText || d.edit == 0 {
+	if !d.lineNumbersVisible() {
 		return nil
 	}
 	win.InitCommonControls()
@@ -311,7 +381,7 @@ func documentForEditor(editor win.HWND) *Document {
 }
 
 func (d *Document) syncLineNumberGutterWithViewport() {
-	if d.snapshot.Kind != core.KindText || d.edit == 0 {
+	if !d.lineNumbersVisible() {
 		return
 	}
 	firstVisible, err := d.edit.SendMessage(co.EM_GETFIRSTVISIBLELINE, 0, 0)
@@ -331,7 +401,7 @@ func (d *Document) paintLineNumberGutter(
 	hdc win.HDC,
 	width, height, titleHeight, statusHeight, dpi int,
 ) error {
-	if d.snapshot.Kind != core.KindText || d.edit == 0 {
+	if !d.lineNumbersVisible() {
 		return nil
 	}
 	rect := d.lineNumberGutterRect(width, height, titleHeight, statusHeight, dpi)

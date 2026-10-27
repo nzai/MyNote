@@ -26,6 +26,7 @@ func TestTitlebarHitTestAt96DPI(t *testing.T) {
 		{name: "bottom right corner", x: 718, y: 518, want: co.HT_BOTTOMRIGHT},
 		{name: "app icon stays caption", x: 20, y: 20, want: co.HT_CAPTION},
 		{name: "save stays client", x: layout.saveLeft + 10, y: 20, want: co.HT_CLIENT},
+		{name: "options stays client", x: layout.optionsLeft + 10, y: 20, want: co.HT_CLIENT},
 		{name: "close stays client", x: layout.closeLeft + 10, y: 20, want: co.HT_CLIENT},
 		{name: "draggable title", x: 120, y: 20, want: co.HT_CAPTION},
 		{name: "content", x: 350, y: 100, want: co.HT_CLIENT},
@@ -60,6 +61,7 @@ func TestTitlebarButtonAt(t *testing.T) {
 	}{
 		{name: "app icon", x: 20, y: 20, want: titlebarButtonNone},
 		{name: "save", x: layout.saveLeft + 10, y: 20, want: titlebarButtonSave},
+		{name: "options", x: layout.optionsLeft + 10, y: 20, want: titlebarButtonOptions},
 		{name: "close", x: layout.closeLeft + 10, y: 20, want: titlebarButtonClose},
 		{name: "title", x: layout.titleLeft + 40, y: 20, want: titlebarButtonNone},
 		{name: "content", x: 100, y: 80, want: titlebarButtonNone},
@@ -87,14 +89,17 @@ func TestTitlebarLayoutPlacesSaveImmediatelyAfterTitle(t *testing.T) {
 	if layout.saveLeft-layout.titleRight != 8 {
 		t.Fatalf("title-to-save gap = %d, want 8", layout.saveLeft-layout.titleRight)
 	}
+	if layout.optionsLeft != layout.saveRight {
+		t.Fatalf("optionsLeft = %d, want saveRight %d", layout.optionsLeft, layout.saveRight)
+	}
 }
 
 func TestTitlebarLayoutKeepsButtonsSeparateInNarrowWindow(t *testing.T) {
 	layout := titlebarLayoutFor(320, 96, 600)
-	if layout.saveRight > layout.closeLeft {
+	if layout.optionsRight > layout.closeLeft {
 		t.Fatalf(
-			"save button ends at %d and overlaps close button starting at %d",
-			layout.saveRight,
+			"options button ends at %d and overlaps close button starting at %d",
+			layout.optionsRight,
 			layout.closeLeft,
 		)
 	}

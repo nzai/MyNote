@@ -4,12 +4,14 @@ package ui
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/nzai/MyNote/internal/config"
 	"github.com/nzai/MyNote/internal/core"
 	"github.com/nzai/MyNote/internal/save"
 	"github.com/rodrigocfd/windigo/co"
@@ -31,6 +33,51 @@ type ClipboardReader interface {
 
 type ClipboardReaderFactory func(win.HWND) ClipboardReader
 
+type clipboardReadResult struct {
+	Snapshot core.Snapshot
+	Warning  error
+}
+
+func readClipboardOrBlank(
+	reader ClipboardReader,
+	blank func() (core.Snapshot, error),
+) (clipboardReadResult, error) {
+	snapshot, readErr := reader.Read(context.Background())
+	if readErr == nil {
+		return clipboardReadResult{Snapshot: snapshot}, nil
+	}
+	if snapshot.CaptureID != "" {
+		return clipboardReadResult{
+			Snapshot: snapshot,
+			Warning:  readErr,
+		}, nil
+	}
+	snapshot, blankErr := blank()
+	if blankErr != nil {
+		return clipboardReadResult{}, errors.Join(
+			readErr,
+			fmt.Errorf("create blank clipboard snapshot: %w", blankErr),
+		)
+	}
+	return clipboardReadResult{
+		Snapshot: snapshot,
+		Warning:  readErr,
+	}, nil
+}
+
+func newBlankClipboardSnapshot() (core.Snapshot, error) {
+	now := time.Now()
+	id, err := core.NewCaptureID(now, rand.Reader)
+	if err != nil {
+		return core.Snapshot{}, fmt.Errorf("create blank clipboard capture ID: %w", err)
+	}
+	return core.Snapshot{
+		CaptureID:  id,
+		CapturedAt: now,
+		Kind:       core.KindText,
+	}, nil
+}
+
 type CacheEnqueuer interface {
 	Enqueue(context.Context, core.Snapshot) func()
 }
@@ -45,23 +92,33 @@ type DocumentSaveService interface {
 type SaveFactory func(core.Snapshot) DocumentSaveService
 
 type ControllerOptions struct {
-	Reader        ClipboardReader
-	ReaderFactory ClipboardReaderFactory
-	Cache         CacheEnqueuer
-	CacheEvents   *CacheEventSink
-	SaveFactory   SaveFactory
-	OpenCacheDir  func() error
-	ClearCache    func(context.Context) error
-	Icon          win.HICON
-	ProgressDelay time.Duration
-	Logger        *slog.Logger
+	Reader         ClipboardReader
+	ReaderFactory  ClipboardReaderFactory
+	Cache          CacheEnqueuer
+	CacheEvents    *CacheEventSink
+	SaveFactory    SaveFactory
+	OpenCacheDir   func() error
+	ClearCache     func(context.Context) error
+	ClearClipboard func(win.HWND) error
+	Icon           win.HICON
+	EditorSettings config.EditorConfig
+	AutoStart      bool
+	FontFamilies   []string
+	SaveSettings   func(config.EditorConfig, bool) error
+	ProgressDelay  time.Duration
+	Logger         *slog.Logger
 }
 
 type Controller struct {
-	native nativeWindowState
-	tray   *Tray
-	opts   ControllerOptions
-	reader ClipboardReader
+	native         nativeWindowState
+	tray           *Tray
+	opts           ControllerOptions
+	reader         ClipboardReader
+	settingsMu     sync.Mutex
+	editorSettings config.EditorConfig
+	autoStart      bool
+	fontFamilies   []string
+	saveSettings   func(config.EditorConfig, bool) error
 
 	mu             sync.Mutex
 	documents      []*Document
@@ -89,12 +146,33 @@ func NewController(options ControllerOptions) (*Controller, error) {
 	if options.ProgressDelay <= 0 {
 		options.ProgressDelay = defaultProgressDelay
 	}
+	if options.EditorSettings.FontFamily == "" {
+		options.EditorSettings = config.DefaultEditorConfig()
+	}
+	if err := options.EditorSettings.Validate(); err != nil {
+		return nil, fmt.Errorf("create controller: invalid editor settings: %w", err)
+	}
+	fontFamilies, err := systemFontFamilies()
+	if err != nil {
+		if options.Logger != nil {
+			options.Logger.Warn(
+				"enumerate installed fonts; using current font only",
+				"error", err,
+			)
+		}
+		fontFamilies = nil
+	}
+	fontFamilies = ensureFontFamily(fontFamilies, options.EditorSettings.FontFamily)
 	class, err := registerNativeClass(controllerWindowClass)
 	if err != nil {
 		return nil, err
 	}
 	controller := &Controller{
 		opts:           options,
+		editorSettings: options.EditorSettings,
+		autoStart:      options.AutoStart,
+		fontFamilies:   fontFamilies,
+		saveSettings:   options.SaveSettings,
 		progress:       make(map[string]*cacheProgress),
 		nextProgressID: 1,
 	}
@@ -157,9 +235,18 @@ func (c *Controller) OpenCurrentClipboard() error {
 		return errors.New("打开剪贴板失败：剪贴板读取器未配置")
 	}
 	readStarted := time.Now()
-	snapshot, err := reader.Read(context.Background())
+	result, err := readClipboardOrBlank(reader, newBlankClipboardSnapshot)
 	if err != nil {
 		return fmt.Errorf("读取当前剪贴板：%w", err)
+	}
+	snapshot := result.Snapshot
+	if result.Warning != nil {
+		c.logger().Warn(
+			"clipboard read failed; opening blank document",
+			"capture_id", snapshot.CaptureID,
+			"duration", time.Since(readStarted),
+			"error", result.Warning,
+		)
 	}
 	c.logger().Debug(
 		"clipboard snapshot captured",
@@ -189,11 +276,15 @@ func (c *Controller) OpenCurrentClipboard() error {
 		saveService = c.opts.SaveFactory(snapshot)
 	}
 	options := DocumentOptions{
-		Snapshot:      snapshot,
-		Position:      position,
-		Icon:          c.opts.Icon,
-		Logger:        c.opts.Logger,
-		ProgressDelay: c.opts.ProgressDelay,
+		Snapshot:       snapshot,
+		Position:       position,
+		Icon:           c.opts.Icon,
+		EditorSettings: c.currentEditorSettings(),
+		AutoStart:      c.currentAutoStart(),
+		FontFamilies:   c.currentFontFamilies(),
+		SaveSettings:   c.saveEditorSettings,
+		Logger:         c.opts.Logger,
+		ProgressDelay:  c.opts.ProgressDelay,
 		OnDestroy: func(destroyed *Document) {
 			c.removeDocument(destroyed)
 		},
@@ -247,6 +338,44 @@ func (c *Controller) OpenCurrentClipboard() error {
 		"open_duration", time.Since(readStarted),
 	)
 	c.startCache(snapshot, document)
+	return nil
+}
+
+func (c *Controller) currentEditorSettings() config.EditorConfig {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+	return c.editorSettings
+}
+
+func (c *Controller) currentAutoStart() bool {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+	return c.autoStart
+}
+
+func (c *Controller) currentFontFamilies() []string {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+	return append([]string(nil), c.fontFamilies...)
+}
+
+func (c *Controller) saveEditorSettings(
+	settings config.EditorConfig,
+	autoStart bool,
+) error {
+	if err := settings.Validate(); err != nil {
+		return fmt.Errorf("save editor settings: %w", err)
+	}
+	if c.saveSettings == nil {
+		return errors.New("save editor settings: persistence service is not configured")
+	}
+	if err := c.saveSettings(settings, autoStart); err != nil {
+		return err
+	}
+	c.settingsMu.Lock()
+	c.editorSettings = settings
+	c.autoStart = autoStart
+	c.settingsMu.Unlock()
 	return nil
 }
 
@@ -325,6 +454,8 @@ func (c *Controller) handleTrayCommand(command TrayCommand) {
 	switch command {
 	case TrayCommandOpen:
 		c.openClipboardFromTray()
+	case TrayCommandClearClipboard:
+		c.clearClipboard()
 	case TrayCommandOpenCache:
 		if c.opts.OpenCacheDir == nil {
 			c.logError("open cache directory", errors.New("cache directory callback is not configured"))
@@ -346,6 +477,26 @@ func (c *Controller) openClipboardFromTray() {
 	if err := c.OpenCurrentClipboard(); err != nil {
 		c.logError("open current clipboard", err)
 		c.notifyError("无法打开剪贴板", err)
+	}
+}
+
+func (c *Controller) clearClipboard() {
+	if c.opts.ClearClipboard == nil {
+		err := errors.New("clipboard clear callback is not configured")
+		c.logError("clear clipboard", err)
+		c.notifyError("无法清空剪贴板", err)
+		return
+	}
+	if err := c.opts.ClearClipboard(c.native.hwnd); err != nil {
+		c.logError("clear clipboard", err)
+		c.notifyError("无法清空剪贴板", err)
+		return
+	}
+	c.logger().Info("system clipboard cleared", "owner", c.native.hwnd)
+	if c.tray != nil {
+		if err := c.tray.Notify("ClipNote", "剪贴板已清空。", false); err != nil {
+			c.logError("show clipboard-cleared notification", err)
+		}
 	}
 }
 

@@ -19,27 +19,13 @@ func TestDocumentWindowUsesAppIcon(t *testing.T) {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 window icon test")
 	}
+	lockGUIThread(t)
 	icon, err := loadAppIcon(assets.AppICO)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
 		_ = icon.DestroyIcon()
-	}()
-
-	document, err := NewDocument(DocumentOptions{
-		Snapshot: core.Snapshot{
-			CaptureID: "window-icon-test",
-			Kind:      core.KindText,
-			Text:      "icon",
-		},
-		Icon: icon,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_ = document.native.hwnd.DestroyWindow()
 	}()
 
 	for _, test := range []struct {
@@ -50,6 +36,22 @@ func TestDocumentWindowUsesAppIcon(t *testing.T) {
 		{name: "big", size: co.ICON_SZ_BIG},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			lockGUIThread(t)
+			document, err := NewDocument(DocumentOptions{
+				Snapshot: core.Snapshot{
+					CaptureID: "window-icon-test",
+					Kind:      core.KindText,
+					Text:      "icon",
+				},
+				Icon: icon,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = document.native.hwnd.DestroyWindow()
+			}()
+
 			got, err := document.native.hwnd.SendMessage(
 				co.WM_GETICON,
 				win.WPARAM(test.size),
@@ -106,6 +108,7 @@ func newSelectionTestDocument(t *testing.T, text string) *Document {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 editor selection test")
 	}
+	lockGUIThread(t)
 	document, err := NewDocument(DocumentOptions{
 		Snapshot: core.Snapshot{
 			CaptureID: "editor-selection-test",
@@ -187,6 +190,7 @@ func TestCreateDocumentWindows(t *testing.T) {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 smoke test")
 	}
 	t.Run("text", func(t *testing.T) {
+		lockGUIThread(t)
 		window, err := createDocumentForTest(core.Snapshot{
 			CaptureID: "test-text",
 			Kind:      core.KindText,
@@ -198,6 +202,7 @@ func TestCreateDocumentWindows(t *testing.T) {
 		window.Close()
 	})
 	t.Run("image", func(t *testing.T) {
+		lockGUIThread(t)
 		img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
 		img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 255})
 		img.SetNRGBA(1, 0, color.NRGBA{G: 255, A: 255})

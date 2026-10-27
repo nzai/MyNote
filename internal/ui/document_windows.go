@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nzai/MyNote/internal/config"
 	"github.com/nzai/MyNote/internal/core"
 	"github.com/nzai/MyNote/internal/save"
 	"github.com/rodrigocfd/windigo/co"
@@ -72,6 +73,10 @@ type DocumentOptions struct {
 	Snapshot        core.Snapshot
 	Position        win.POINT
 	Icon            win.HICON
+	EditorSettings  config.EditorConfig
+	AutoStart       bool
+	FontFamilies    []string
+	SaveSettings    func(config.EditorConfig, bool) error
 	Save            DocumentSaveFunc
 	OnDestroy       func(*Document)
 	OnCloseCanceled func(*Document)
@@ -96,10 +101,19 @@ type Document struct {
 	onCloseCanceled func(*Document)
 	cancelCache     func()
 	logger          *slog.Logger
+	icon            win.HICON
 
 	edit                   win.HWND
 	fonts                  documentFonts
+	editorFont             win.HFONT
+	editorSettings         config.EditorConfig
+	editorSettingsBaseline config.EditorConfig
+	autoStart              bool
+	fontFamilies           []string
+	saveSettings           func(config.EditorConfig, bool) error
+	options                *optionsPanel
 	lineStarts             []int
+	editorTextLength       int
 	lineNumberFirstVisible int
 	contentTitle           string
 	titleTextWidth         int
@@ -154,6 +168,12 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 	if options.ProgressDelay <= 0 {
 		options.ProgressDelay = 3 * time.Second
 	}
+	if options.EditorSettings.FontFamily == "" {
+		options.EditorSettings = config.DefaultEditorConfig()
+	}
+	if err := options.EditorSettings.Validate(); err != nil {
+		return nil, fmt.Errorf("create document: invalid editor settings: %w", err)
+	}
 	if options.Icon == 0 {
 		icon, err := loadStockAppIcon()
 		if err != nil {
@@ -170,10 +190,19 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 		snapshot:               options.Snapshot,
 		saveState:              saveState,
 		save:                   options.Save,
+		saveSettings:           options.SaveSettings,
 		onDestroy:              options.OnDestroy,
 		onCloseCanceled:        options.OnCloseCanceled,
 		cancelCache:            options.OnCancelCache,
 		logger:                 options.Logger,
+		icon:                   options.Icon,
+		editorSettings:         options.EditorSettings,
+		editorSettingsBaseline: options.EditorSettings,
+		autoStart:              options.AutoStart,
+		fontFamilies: ensureFontFamily(
+			options.FontFamilies,
+			options.EditorSettings.FontFamily,
+		),
 		cacheState:             "",
 		saveProgress:           newProgressState(options.ProgressDelay),
 		image:                  raster,
@@ -183,7 +212,9 @@ func NewDocument(options DocumentOptions) (*Document, error) {
 		},
 	}
 	if options.Snapshot.Kind == core.KindText {
-		doc.lineStarts = logicalLineStarts(options.Snapshot.Text)
+		doc.lineStarts, doc.editorTextLength = editorTextLayout(
+			options.Snapshot.Text,
+		)
 	}
 	doc.contentTitle = documentContentTitle(
 		doc.snapshot.Kind,
@@ -315,11 +346,14 @@ func (d *Document) createEditor() error {
 	if d.snapshot.Kind != core.KindText {
 		return nil
 	}
+	if err := ensureRichEditLibrary(); err != nil {
+		return fmt.Errorf("create document editor: %w", err)
+	}
 	editStyle := co.WS_CHILD | co.WS_VISIBLE | co.WS_VSCROLL |
 		co.WS(co.ES_MULTILINE|co.ES_AUTOVSCROLL|co.ES_WANTRETURN|co.ES_NOHIDESEL)
 	edit, err := win.CreateWindowEx(
 		0,
-		win.ClassNameStr("EDIT"),
+		win.ClassNameStr(richEditClassName),
 		"",
 		editStyle,
 		win.POINT{},
@@ -333,14 +367,14 @@ func (d *Document) createEditor() error {
 		return fmt.Errorf("create document editor: %w", err)
 	}
 	d.edit = edit
+	if err := d.applyEditorSettings(d.editorSettings); err != nil {
+		return err
+	}
 	if err := d.installLineNumberRepaintHook(); err != nil {
 		return err
 	}
 	if err := edit.SetWindowText(normalizeEditorText(d.snapshot.Text)); err != nil {
 		return fmt.Errorf("set document editor text: %w", err)
-	}
-	if _, err := edit.SendMessage(co.WM_SETFONT, win.WPARAM(d.fonts.ui), 1); err != nil {
-		return fmt.Errorf("set document editor font: %w", err)
 	}
 	d.updateTitleTextWidth()
 	d.layoutEditor()
@@ -432,6 +466,7 @@ func (d *Document) handleNativeMessage(
 		_ = d.native.hwnd.InvalidateRect(nil, true)
 		return 0, true
 	case co.WM_CLOSE:
+		d.closeOptions(true)
 		if !d.confirmClose() {
 			return 0, true
 		}
@@ -469,6 +504,11 @@ func (d *Document) handleDPIChanged(lParam win.LPARAM) {
 		true,
 	)
 	d.layoutEditor()
+	if d.options != nil {
+		if err := d.options.updateFontResources(dpiFor(d.options.native.hwnd)); err != nil {
+			d.logError("update editor options fonts after DPI change", err)
+		}
+	}
 	d.updateScrollbars()
 	_ = d.native.hwnd.InvalidateRect(nil, true)
 }
@@ -480,7 +520,12 @@ func (d *Document) handlePaint() (uintptr, bool) {
 		return 0, false
 	}
 	defer d.native.hwnd.EndPaint(&paint)
-	if err := d.paint(hdc); err != nil {
+	width, height, err := clientSize(d.native.hwnd)
+	if err != nil {
+		d.logError("measure document window for paint", err)
+		return 0, false
+	}
+	if err := paintDoubleBuffered(hdc, width, height, d.paint); err != nil {
 		d.logError("paint document window", err)
 		return 0, false
 	}
@@ -584,6 +629,9 @@ func (d *Document) paintButtonBackground(hdc win.HDC, width, dpi int) error {
 	case titlebarButtonSave:
 		rect.Left = int32(layout.saveLeft)
 		rect.Right = int32(layout.saveRight)
+	case titlebarButtonOptions:
+		rect.Left = int32(layout.optionsLeft)
+		rect.Right = int32(layout.optionsRight)
 	case titlebarButtonClose:
 		rect.Left = int32(layout.closeLeft)
 		rect.Right = int32(width)
@@ -636,6 +684,24 @@ func (d *Document) paintTitle(hdc win.HDC, width, titleHeight, dpi int) error {
 		"\uE74E",
 		d.fonts.icon,
 		colorTextPrimary,
+	); err != nil {
+		return err
+	}
+	optionsColor := colorTextPrimary
+	if d.options != nil || d.hover == titlebarButtonOptions {
+		optionsColor = colorAccent
+	}
+	if err := drawGlyphCentered(
+		hdc,
+		win.RECT{
+			Left:   int32(layout.optionsLeft),
+			Top:    0,
+			Right:  int32(layout.optionsRight),
+			Bottom: int32(titleHeight),
+		},
+		"\uE713",
+		d.fonts.icon,
+		optionsColor,
 	); err != nil {
 		return err
 	}
@@ -901,7 +967,7 @@ func (d *Document) handleCommand(wParam win.WPARAM) {
 		return
 	}
 	d.saveState.SetText(text)
-	d.lineStarts = logicalLineStarts(text)
+	d.lineStarts, d.editorTextLength = editorTextLayout(text)
 	d.contentTitle = documentContentTitle(core.KindText, text, 0, 0)
 	d.layoutEditor()
 	d.updateScrollbars()
@@ -940,6 +1006,8 @@ func (d *Document) handleClick(lParam win.LPARAM) {
 	case titlebarButtonSave:
 		shift, _ := win.GetKeyState(co.VK_SHIFT)
 		d.saveDocument(shift)
+	case titlebarButtonOptions:
+		d.toggleOptions()
 	case titlebarButtonClose:
 		_ = d.native.hwnd.PostMessage(co.WM_CLOSE, 0, 0)
 	}
@@ -980,6 +1048,10 @@ func (d *Document) handleDestroyed() {
 	}
 	d.destroyed = true
 	_ = d.native.hwnd.KillTimer(saveProgressTimerID)
+	if d.editorFont != 0 {
+		_ = d.editorFont.DeleteObject()
+		d.editorFont = 0
+	}
 	if d.saveCancel != nil {
 		d.saveCancel()
 		d.saveCancel = nil
@@ -1165,6 +1237,9 @@ func (d *Document) confirmClose() bool {
 		_ = d.native.hwnd.InvalidateRect(nil, true)
 		return false
 	}
+	if d.editorSettings.SuppressClosePrompt {
+		return true
+	}
 	answer, err := d.native.hwnd.MessageBox(
 		"这篇剪贴板文本有未保存的修改。\n\n是否在关闭前保存？",
 		"未保存的修改",
@@ -1205,7 +1280,7 @@ func (d *Document) executeCommand(command Command) {
 		d.saveDocument(true)
 	case CommandSelectAll:
 		if d.edit != 0 {
-			_, _ = d.edit.SendMessage(co.EM_SETSEL, 0, win.LPARAM(^uintptr(0)))
+			_, _ = d.edit.SendMessage(co.EM_SETSEL, 0, win.LPARAM(d.editorTextLength))
 		}
 	case CommandClose:
 		_ = d.native.hwnd.PostMessage(co.WM_CLOSE, 0, 0)

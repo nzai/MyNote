@@ -68,6 +68,24 @@ const (
 	trayActionMenu
 )
 
+type trayMenuItem struct {
+	command TrayCommand
+	label   string
+}
+
+func trayMenuItems() []trayMenuItem {
+	return []trayMenuItem{
+		{command: TrayCommandOpen, label: "新建并粘贴"},
+		{},
+		{command: TrayCommandClearClipboard, label: "清空剪贴板"},
+		{},
+		{command: TrayCommandOpenCache, label: "打开缓存文件夹"},
+		{command: TrayCommandClearCache, label: "清空缓存"},
+		{},
+		{command: TrayCommandExit, label: "退出"},
+	}
+}
+
 type Tray struct {
 	owner win.HWND
 	icon  win.HICON
@@ -158,16 +176,7 @@ func (t *Tray) ShowMenu() (TrayCommand, error) {
 		_ = menu.DestroyMenu()
 	}()
 
-	items := []struct {
-		command TrayCommand
-		label   string
-	}{
-		{command: TrayCommandOpen, label: "打开当前剪贴板"},
-		{command: TrayCommandOpenCache, label: "打开缓存文件夹"},
-		{command: TrayCommandClearCache, label: "清空临时缓存"},
-		{command: 0, label: ""},
-		{command: TrayCommandExit, label: "退出"},
-	}
+	items := trayMenuItems()
 	for _, item := range items {
 		flags := uintptr(co.MF_STRING)
 		commandID := uintptr(item.command)

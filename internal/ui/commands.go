@@ -17,6 +17,7 @@ type TrayCommand uint16
 const (
 	TrayCommandNone TrayCommand = iota
 	TrayCommandOpen
+	TrayCommandClearClipboard
 	TrayCommandOpenCache
 	TrayCommandClearCache
 	TrayCommandExit

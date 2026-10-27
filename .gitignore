@@ -1,3 +1,7 @@
 /.work/
 /bin/
 /logs/
+/cmd/clipnote/cache/
+/cmd/clipnote/config.json
+/cmd/clipnote/logs/
+/cmd/clipnote/clipnote.exe

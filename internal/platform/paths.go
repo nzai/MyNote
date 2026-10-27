@@ -11,29 +11,24 @@ type Paths struct {
 	LogDir     string
 }
 
-func ResolvePaths(exeDir, localAppData string, canWrite func(string) bool) (Paths, error) {
+func ResolvePaths(exeDir string, canWrite func(string) bool) (Paths, error) {
 	if exeDir == "" {
 		return Paths{}, errors.New("resolve paths: executable directory is empty")
-	}
-	if localAppData == "" {
-		return Paths{}, errors.New("resolve paths: local app data directory is empty")
 	}
 	if canWrite == nil {
 		return Paths{}, errors.New("resolve paths: write probe is nil")
 	}
 
 	exeDir = filepath.Clean(exeDir)
-	localAppData = filepath.Clean(localAppData)
-	appDataDir := filepath.Join(localAppData, "ClipNote")
-
-	logDir := filepath.Join(exeDir, "logs")
-	if !canWrite(logDir) {
-		logDir = filepath.Join(appDataDir, "logs")
+	if !canWrite(exeDir) {
+		return Paths{}, errors.New(
+			"resolve paths: portable data directory " + exeDir + " is not writable",
+		)
 	}
 
 	return Paths{
-		ConfigFile: filepath.Join(appDataDir, "config.json"),
-		CacheDir:   filepath.Join(appDataDir, "cache"),
-		LogDir:     logDir,
+		ConfigFile: filepath.Join(exeDir, "config.json"),
+		CacheDir:   filepath.Join(exeDir, "cache"),
+		LogDir:     filepath.Join(exeDir, "logs"),
 	}, nil
 }

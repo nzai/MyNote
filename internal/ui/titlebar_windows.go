@@ -5,14 +5,15 @@ package ui
 import "github.com/rodrigocfd/windigo/co"
 
 const (
-	titlebarHeightDIP   = 40
-	titlebarPaddingDIP  = 12
-	titleSaveGapDIP     = 8
-	iconTitleGapDIP     = 8
-	saveButtonWidthDIP  = 44
-	closeButtonWidthDIP = 44
-	resizeBorderDIP     = 6
-	statusbarHeightDIP  = 28
+	titlebarHeightDIP     = 40
+	titlebarPaddingDIP    = 12
+	titleSaveGapDIP       = 8
+	iconTitleGapDIP       = 8
+	saveButtonWidthDIP    = 44
+	optionsButtonWidthDIP = 44
+	closeButtonWidthDIP   = 44
+	resizeBorderDIP       = 6
+	statusbarHeightDIP    = 28
 )
 
 type titlebarButton uint8
@@ -20,16 +21,19 @@ type titlebarButton uint8
 const (
 	titlebarButtonNone titlebarButton = iota
 	titlebarButtonSave
+	titlebarButtonOptions
 	titlebarButtonClose
 )
 
 type titlebarLayout struct {
-	iconLeft   int
-	titleLeft  int
-	titleRight int
-	saveLeft   int
-	saveRight  int
-	closeLeft  int
+	iconLeft     int
+	titleLeft    int
+	titleRight   int
+	saveLeft     int
+	saveRight    int
+	optionsLeft  int
+	optionsRight int
+	closeLeft    int
 }
 
 func titlebarLayoutFor(width, dpi, titleWidth int) titlebarLayout {
@@ -40,10 +44,11 @@ func titlebarLayoutFor(width, dpi, titleWidth int) titlebarLayout {
 	titleLeft := iconLeft + scaleDIP(appIconWidthDIP+iconTitleGapDIP, dpi)
 	gap := scaleDIP(titleSaveGapDIP, dpi)
 	saveWidth := scaleDIP(saveButtonWidthDIP, dpi)
+	optionsWidth := scaleDIP(optionsButtonWidthDIP, dpi)
 	closeWidth := scaleDIP(closeButtonWidthDIP, dpi)
 
 	closeLeft := width - closeWidth
-	maxSaveLeft := closeLeft - saveWidth - gap
+	maxSaveLeft := closeLeft - optionsWidth - saveWidth
 	if maxSaveLeft < titleLeft {
 		maxSaveLeft = titleLeft
 	}
@@ -52,17 +57,21 @@ func titlebarLayoutFor(width, dpi, titleWidth int) titlebarLayout {
 		saveLeft = maxSaveLeft
 	}
 	saveRight := saveLeft + saveWidth
+	optionsLeft := saveRight
+	optionsRight := optionsLeft + optionsWidth
 	titleRight := saveLeft - gap
 	if titleRight < titleLeft {
 		titleRight = titleLeft
 	}
 	return titlebarLayout{
-		iconLeft:   iconLeft,
-		titleLeft:  titleLeft,
-		titleRight: titleRight,
-		saveLeft:   saveLeft,
-		saveRight:  saveRight,
-		closeLeft:  closeLeft,
+		iconLeft:     iconLeft,
+		titleLeft:    titleLeft,
+		titleRight:   titleRight,
+		saveLeft:     saveLeft,
+		saveRight:    saveRight,
+		optionsLeft:  optionsLeft,
+		optionsRight: optionsRight,
+		closeLeft:    closeLeft,
 	}
 }
 
@@ -114,6 +123,9 @@ func titlebarButtonAt(layout titlebarLayout, height, dpi, x, y int) titlebarButt
 	}
 	if x >= layout.saveLeft && x < layout.saveRight {
 		return titlebarButtonSave
+	}
+	if x >= layout.optionsLeft && x < layout.optionsRight {
+		return titlebarButtonOptions
 	}
 	if x >= layout.closeLeft {
 		return titlebarButtonClose

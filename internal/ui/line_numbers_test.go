@@ -76,6 +76,7 @@ func TestTextDocumentUsesPreviewTitleAndLogicalLineNumbers(t *testing.T) {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 line-number test")
 	}
+	lockGUIThread(t)
 	document, err := NewDocument(DocumentOptions{
 		Snapshot: core.Snapshot{
 			CaptureID: "line-number-test",
@@ -141,6 +142,7 @@ func TestVisibleLineNumbersKeepBlankLinesAfterWrappedText(t *testing.T) {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 line-number test")
 	}
+	lockGUIThread(t)
 	text := "**已完成**\n\n" +
 		"- 文本编辑框自动折行，不再出现横向滚动条；内容超高时才显示纵向滚动条。\n" +
 		"- 左侧增加行号，并与原始文本行对齐；自动折行的续行留空，不重复编号。\n" +
@@ -188,10 +190,96 @@ func TestVisibleLineNumbersKeepBlankLinesAfterWrappedText(t *testing.T) {
 	}
 }
 
+func TestLineNumberGutterCoversLeftContentPadding(t *testing.T) {
+	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
+		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 line-number test")
+	}
+	lockGUIThread(t)
+	document, err := NewDocument(DocumentOptions{
+		Snapshot: core.Snapshot{
+			CaptureID: "line-number-left-edge-test",
+			Kind:      core.KindText,
+			Text:      "line number gutter",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = document.native.hwnd.ShowWindow(co.SW_HIDE)
+	defer func() {
+		_ = document.native.hwnd.DestroyWindow()
+	}()
+
+	screen, err := win.HWND(0).GetDC()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = win.HWND(0).ReleaseDC(screen)
+	}()
+	target, err := screen.CreateCompatibleDC()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = target.DeleteDC()
+	}()
+	bitmap, err := screen.CreateCompatibleBitmap(640, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBitmap, err := target.SelectObjectBmp(bitmap)
+	if err != nil {
+		_ = bitmap.DeleteObject()
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = target.SelectObjectBmp(oldBitmap)
+		_ = bitmap.DeleteObject()
+	}()
+	background, err := brushFor(colorWindowBackground)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := win.RECT{Right: 640, Bottom: 400}
+	if err := target.FillRect(&full, background); err != nil {
+		t.Fatal(err)
+	}
+
+	dpi := dpiFor(document.native.hwnd)
+	titleHeight := scaleDIP(titlebarHeightDIP, dpi)
+	statusHeight := scaleDIP(statusbarHeightDIP, dpi)
+	if err := document.paintLineNumberGutter(
+		target,
+		640,
+		400,
+		titleHeight,
+		statusHeight,
+		dpi,
+	); err != nil {
+		t.Fatal(err)
+	}
+	pixel, err := pixelColor(target, win.POINT{
+		X: 0,
+		Y: int32(titleHeight + scaleDIP(20, dpi)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pixel != colorLineGutter {
+		t.Fatalf(
+			"line-number gutter left pixel = %#08x, want gutter color %#08x",
+			pixel,
+			colorLineGutter,
+		)
+	}
+}
+
 func TestTextDocumentLoadPreservesOriginalTextAndCleanState(t *testing.T) {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 document load test")
 	}
+	lockGUIThread(t)
 	text := "first\nsecond\n"
 	document, err := NewDocument(DocumentOptions{
 		Snapshot: core.Snapshot{

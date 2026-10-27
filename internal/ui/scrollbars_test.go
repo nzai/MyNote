@@ -37,6 +37,7 @@ func TestTextEditorShowsOnlyNeededScrollbars(t *testing.T) {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 scrollbar test")
 	}
+	lockGUIThread(t)
 	document, err := NewDocument(DocumentOptions{
 		Snapshot: core.Snapshot{
 			CaptureID: "scrollbar-test",

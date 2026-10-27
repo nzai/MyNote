@@ -81,6 +81,18 @@ func TestAsyncSaveCancelRevokesDeferredClose(t *testing.T) {
 	}
 }
 
+func TestSuppressClosePromptClosesDirtyDocument(t *testing.T) {
+	document := newSaveTestDocument(func(context.Context) (DocumentSaveResult, error) {
+		return DocumentSaveResult{}, nil
+	})
+	document.saveState.SetText("edited")
+	document.editorSettings.SuppressClosePrompt = true
+
+	if !document.confirmClose() {
+		t.Fatal("dirty document must close without prompting when suppression is enabled")
+	}
+}
+
 func newSaveTestDocument(run func(context.Context) (DocumentSaveResult, error)) *Document {
 	snapshot := core.Snapshot{CaptureID: "save-test", Kind: core.KindText}
 	return &Document{

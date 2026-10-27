@@ -57,6 +57,23 @@ func TestTrayActionFor(t *testing.T) {
 	}
 }
 
+func TestClearClipboardTrayCommandInvokesClearer(t *testing.T) {
+	const owner win.HWND = 0x1234
+	controller := &Controller{
+		native: nativeWindowState{hwnd: owner},
+		opts: ControllerOptions{
+			ClearClipboard: func(gotOwner win.HWND) error {
+				if gotOwner != owner {
+					t.Fatalf("clear clipboard owner = %#x, want %#x", gotOwner, owner)
+				}
+				return nil
+			},
+		},
+	}
+
+	controller.handleTrayCommand(TrayCommandClearClipboard)
+}
+
 func TestExitCoordinatorWaitsForDeferredDocumentClose(t *testing.T) {
 	var exit exitCoordinator
 	destroyController := exit.closeBatch([]documentCloseDisposition{
@@ -107,6 +124,7 @@ func TestCreateControllerAndTray(t *testing.T) {
 	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
 		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 smoke test")
 	}
+	lockGUIThread(t)
 	if got := unsafe.Sizeof(trayNotifyIconData{}); got != 976 {
 		t.Fatalf("NOTIFYICONDATAW size = %d, want 976", got)
 	}

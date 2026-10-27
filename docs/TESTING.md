@@ -6,18 +6,18 @@
 
 在仓库根目录运行：
 
-```powershell
-$env:GOCACHE = (Join-Path $PWD ".work\gocache")
+```bat
+set "GOCACHE=%CD%\.work\gocache"
 go test ./...
 go vet ./...
-.\scripts\build.ps1
-.\bin\clipnote.exe --check
+scripts\build.cmd
+bin\clipnote.exe --check
 ```
 
-如果 PowerShell 禁止执行本地脚本，请把构建命令替换为：
+构建脚本的 CMD 入口会自动绕过本次进程的 PowerShell 脚本执行策略：
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
+```bat
+scripts\build.cmd -ConsoleBuild
 ```
 
 预期：
@@ -25,6 +25,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
 - 所有 Go 测试通过。
 - `go vet` 无诊断。
 - 生成 `bin\clipnote.exe`。
+- 发布版 PE 子系统为 GUI（2）；`scripts\build.cmd -ConsoleBuild` 生成的调试版为 console（3）。
 - `--check` 输出 `version`、`executable`、`log_dir`、`log_file`、`cache_dir`、`config_file` 以及当前限制值，退出码为 0。
 
 可选的 Win32 窗口冒烟测试会真实创建本机窗口：
@@ -32,6 +33,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```powershell
 $env:CLIPNOTE_GUI_TEST = "1"
 go test ./internal/ui -run TestCreateDocumentWindows -count=1 -v
+```
+
+选项窗口的绘制原子性测试会在背景清空后直接采样目标画布，确认新画面完整合成前不会改掉旧画面：
+
+```powershell
+$env:CLIPNOTE_GUI_TEST = "1"
+go test ./internal/ui -run "TestOptions(PaintKeepsPreviousFrameVisibleUntilComplete|WindowPaintUsesOffscreenFrame)" -count=1 -v
 ```
 
 在没有交互桌面或没有可用 `Shell_TrayWnd` 的自动化环境中，托盘测试会跳过。跳过不等于通过。
@@ -43,7 +51,7 @@ go test ./internal/ui -run TestCreateDocumentWindows -count=1 -v
 3. 左键单击托盘图标一次，确认只出现一个窗口，标题栏无菜单栏。
 4. 确认标题栏依次显示应用图标、内容预览标题、紧贴标题的保存图标，关闭图标固定在右上角。
 5. 查看任务栏按钮，确认文本窗口显示同样的内容预览；图片窗口显示“（图片）宽 × 高”。
-6. 右键单击托盘图标，确认菜单包含“打开当前剪贴板”“打开缓存文件夹”“清空临时缓存”“退出”。
+6. 右键单击托盘图标，确认菜单按分隔线分为四组：“新建并粘贴”；“清空剪贴板”；“打开缓存文件夹 / 清空缓存”；“退出”。
 7. 关闭所有剪贴板窗口，确认托盘图标和进程仍在运行。
 
 ## 文本捕获与窗口独立性
@@ -95,7 +103,7 @@ go test ./internal/ui -run TestCreateDocumentWindows -count=1 -v
 3. 在异步保存已经开始时修改文本，再选择退出；如果保存完成后仍有新修改，确认程序会再次要求处理未保存内容。
 4. 在退出确认中选择“取消”，确认程序继续驻留托盘，不会稍后自行退出。
 5. 在缓存写入进行时退出，确认退出后缓存目录中没有 `.partial-*` 目录。
-6. 托盘菜单选择“打开缓存文件夹”，确认打开的是 `%LOCALAPPDATA%\ClipNote\cache`。
+6. 托盘菜单选择“打开缓存文件夹”，确认打开的是 `clipnote.exe` 同目录下的 `cache` 文件夹。
 7. 托盘菜单选择“清空临时缓存”，先取消一次确认目录内容未变，再确认清空。
 8. 确认清空缓存不会删除手动保存到其他位置的文件。
 
@@ -133,7 +141,7 @@ go test ./internal/ui -run TestCreateDocumentWindows -count=1 -v
 2. 使用 `--debug=cache,ui,clipboard` 启动，操作托盘和窗口，确认对应范围有 debug 日志，其他范围没有批量 debug 输出。
 3. 检查日志为 JSON Lines，每行包含时间、级别、范围和任务标识。
 4. 搜索日志，确认没有出现剪贴板正文或图片二进制内容。
-5. 让程序目录不可写或把程序放在无写权限目录，确认日志回退到 `%LOCALAPPDATA%\ClipNote\logs`，且 `--check` 报告实际路径。
+5. 把程序放在无写权限目录，确认程序明确报告便携数据目录不可写并拒绝启动，不会回退到 `%LOCALAPPDATA%`。
 6. 检查日志轮转配置生效，单个日志文件不会无限增长。
 
 ## 验收记录

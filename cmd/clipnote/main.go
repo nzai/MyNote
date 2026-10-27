@@ -32,7 +32,7 @@ const (
 	workerCloseTime    = 3 * time.Second
 )
 
-var version = "0.1.0-dev"
+var version = "1.0.0-dev"
 
 type cliOptions struct {
 	check       bool
@@ -114,14 +114,7 @@ func initialize(options cliOptions) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("normalize executable path %q: %w", exePath, err)
 	}
-	localAppData := os.Getenv("LOCALAPPDATA")
-	if localAppData == "" {
-		localAppData, err = os.UserCacheDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolve local app data directory: %w", err)
-		}
-	}
-	paths, err := platform.ResolvePaths(filepath.Dir(exePath), localAppData, canWriteDir)
+	paths, err := platform.ResolvePaths(filepath.Dir(exePath), canWriteDir)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +177,92 @@ func runApplication(app *appRuntime) int {
 			logger.Error("close single-instance mutex", "error", err)
 		}
 	}()
+
+	autoStartService, autoStartServiceErr := platform.NewWinAutoStart(app.exePath)
+	autoStartEnabled := false
+	if autoStartServiceErr != nil {
+		logger.Error(
+			"initialize auto-start registry service",
+			"executable", app.exePath,
+			"error", autoStartServiceErr,
+		)
+	} else {
+		autoStartEnabled, err = autoStartService.Enabled()
+		if err != nil {
+			logger.Error("read auto-start registry state", "error", err)
+			autoStartEnabled = false
+		}
+	}
+	saveEditorSettings := func(
+		editor config.EditorConfig,
+		enabled bool,
+	) error {
+		if autoStartService == nil {
+			if enabled {
+				return fmt.Errorf(
+					"auto-start registry service is unavailable: %w",
+					autoStartServiceErr,
+				)
+			}
+			next, err := persistUISettings(
+				app.cfg,
+				editor,
+				false,
+				false,
+				func(bool) error {
+					return fmt.Errorf(
+						"auto-start registry service is unavailable: %w",
+						autoStartServiceErr,
+					)
+				},
+				func(value config.Config) error {
+					return config.Save(app.paths.ConfigFile, value)
+				},
+			)
+			if err != nil {
+				return err
+			}
+			app.cfg = next
+			logger.Info(
+				"UI settings saved",
+				"font_family", editor.FontFamily,
+				"font_point_size", editor.FontPointSize,
+				"line_spacing", editor.LineSpacing,
+				"show_line_numbers", editor.ShowLineNumbers,
+				"suppress_close_prompt", editor.SuppressClosePrompt,
+				"auto_start", false,
+			)
+			return nil
+		}
+		currentAutoStart, err := autoStartService.Enabled()
+		if err != nil {
+			return fmt.Errorf("read current auto-start state: %w", err)
+		}
+		next, err := persistUISettings(
+			app.cfg,
+			editor,
+			enabled,
+			currentAutoStart,
+			autoStartService.SetEnabled,
+			func(value config.Config) error {
+				return config.Save(app.paths.ConfigFile, value)
+			},
+		)
+		if err != nil {
+			return err
+		}
+		app.cfg = next
+		logger.Info(
+			"UI settings saved",
+			"font_family", editor.FontFamily,
+			"font_point_size", editor.FontPointSize,
+			"line_spacing", editor.LineSpacing,
+			"show_line_numbers", editor.ShowLineNumbers,
+			"suppress_close_prompt", editor.SuppressClosePrompt,
+			"auto_start", enabled,
+		)
+		return nil
+	}
 
 	cacheLogger := app.logger.Scope("cache").With("task_id", "cache-worker")
 	store := cache.NewStore(cache.Options{
@@ -272,13 +351,17 @@ func runApplication(app *appRuntime) int {
 				rand.Reader,
 			)
 		},
-		Cache:         worker,
-		CacheEvents:   cacheEvents,
-		SaveFactory:   newSaveService,
-		OpenCacheDir:  openCacheDir,
-		ClearCache:    clearCache,
-		ProgressDelay: time.Duration(app.cfg.UI.ProgressDelayMS) * time.Millisecond,
-		Logger:        uiLogger,
+		Cache:          worker,
+		CacheEvents:    cacheEvents,
+		SaveFactory:    newSaveService,
+		OpenCacheDir:   openCacheDir,
+		ClearCache:     clearCache,
+		ClearClipboard: platform.ClearWinClipboard,
+		EditorSettings: app.cfg.UI.Editor,
+		AutoStart:      autoStartEnabled,
+		SaveSettings:   saveEditorSettings,
+		ProgressDelay:  time.Duration(app.cfg.UI.ProgressDelayMS) * time.Millisecond,
+		Logger:         uiLogger,
 	})
 
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), workerCloseTime)

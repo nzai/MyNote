@@ -51,7 +51,42 @@ func (d *Document) scrollbarNeeded(bar co.SBB) bool {
 		d.logError("query editor scroll range", err)
 		return false
 	}
+	if bar == co.SBB_VERT && info.Page == 0 {
+		// RichEdit can report a placeholder range before its first visible
+		// layout pass. Its last-character position still reflects wrapped rows.
+		return d.editorContentExceedsViewport()
+	}
 	return scrollRangeExceedsPage(info)
+}
+
+func (d *Document) editorContentExceedsViewport() bool {
+	length, err := d.edit.SendMessage(co.WM_GETTEXTLENGTH, 0, 0)
+	if err != nil || length == 0 {
+		return false
+	}
+	position, err := d.edit.SendMessage(
+		co.EM_POSFROMCHAR,
+		win.WPARAM(length-1),
+		0,
+	)
+	if err != nil {
+		d.logError("position editor's last character", err)
+		return true
+	}
+	x, y := decodeMousePosition(position)
+	if x == -1 && y == -1 {
+		return true
+	}
+	client, err := d.edit.GetClientRect()
+	if err != nil {
+		d.logError("measure editor for scroll range", err)
+		return true
+	}
+	lineHeight := d.fontLineHeight()
+	if lineHeight < 1 {
+		lineHeight = 1
+	}
+	return y+lineHeight > int(client.Bottom)
 }
 
 func scrollRangeExceedsPage(info win.SCROLLINFO) bool {

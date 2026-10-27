@@ -10,20 +10,25 @@ import (
 	"time"
 
 	"github.com/nzai/MyNote/assets"
+	"github.com/nzai/MyNote/internal/config"
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/win"
 )
 
 type Options struct {
-	Reader        ClipboardReader
-	ReaderFactory ClipboardReaderFactory
-	Cache         CacheEnqueuer
-	CacheEvents   *CacheEventSink
-	SaveFactory   SaveFactory
-	OpenCacheDir  func() error
-	ClearCache    func(context.Context) error
-	ProgressDelay time.Duration
-	Logger        *slog.Logger
+	Reader         ClipboardReader
+	ReaderFactory  ClipboardReaderFactory
+	Cache          CacheEnqueuer
+	CacheEvents    *CacheEventSink
+	SaveFactory    SaveFactory
+	OpenCacheDir   func() error
+	ClearCache     func(context.Context) error
+	ClearClipboard func(win.HWND) error
+	EditorSettings config.EditorConfig
+	AutoStart      bool
+	SaveSettings   func(config.EditorConfig, bool) error
+	ProgressDelay  time.Duration
+	Logger         *slog.Logger
 }
 
 func Run(options Options) int {
@@ -39,16 +44,20 @@ func Run(options Options) int {
 		return 1
 	}
 	controller, err := NewController(ControllerOptions{
-		Reader:        options.Reader,
-		ReaderFactory: options.ReaderFactory,
-		Cache:         options.Cache,
-		CacheEvents:   options.CacheEvents,
-		SaveFactory:   options.SaveFactory,
-		OpenCacheDir:  options.OpenCacheDir,
-		ClearCache:    options.ClearCache,
-		Icon:          icon,
-		ProgressDelay: options.ProgressDelay,
-		Logger:        options.Logger,
+		Reader:         options.Reader,
+		ReaderFactory:  options.ReaderFactory,
+		Cache:          options.Cache,
+		CacheEvents:    options.CacheEvents,
+		SaveFactory:    options.SaveFactory,
+		OpenCacheDir:   options.OpenCacheDir,
+		ClearCache:     options.ClearCache,
+		ClearClipboard: options.ClearClipboard,
+		Icon:           icon,
+		EditorSettings: options.EditorSettings,
+		AutoStart:      options.AutoStart,
+		SaveSettings:   options.SaveSettings,
+		ProgressDelay:  options.ProgressDelay,
+		Logger:         options.Logger,
 	})
 	if err != nil {
 		if iconOwned {

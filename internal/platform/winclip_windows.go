@@ -5,12 +5,21 @@ package platform
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/nzai/MyNote/internal/clipboard"
 	"github.com/nzai/MyNote/internal/core"
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/win"
 )
+
+var clipboardClearRetryDelays = []time.Duration{
+	20 * time.Millisecond,
+	40 * time.Millisecond,
+	80 * time.Millisecond,
+	160 * time.Millisecond,
+	320 * time.Millisecond,
+}
 
 type winClipboardOpener struct {
 	owner win.HWND
@@ -29,6 +38,50 @@ var (
 
 func NewWinClipboardOpener(owner win.HWND) clipboard.Opener {
 	return winClipboardOpener{owner: owner}
+}
+
+func ClearWinClipboard(owner win.HWND) error {
+	var lastErr error
+	// Other applications can hold the clipboard briefly; use the same bounded
+	// backoff as the reader instead of failing on the first busy attempt.
+	for attempt := 0; attempt <= len(clipboardClearRetryDelays); attempt++ {
+		handle, err := win.OpenClipboard(owner)
+		if err == nil {
+			return clearOpenedClipboard(handle)
+		}
+		lastErr = err
+		if attempt < len(clipboardClearRetryDelays) {
+			time.Sleep(clipboardClearRetryDelays[attempt])
+		}
+	}
+	return fmt.Errorf(
+		"open Win32 clipboard for clearing after %d attempts: %w",
+		len(clipboardClearRetryDelays)+1,
+		lastErr,
+	)
+}
+
+type clipboardClearSession interface {
+	EmptyClipboard() error
+	CloseClipboard() error
+}
+
+func clearOpenedClipboard(session clipboardClearSession) error {
+	emptyErr := session.EmptyClipboard()
+	closeErr := session.CloseClipboard()
+	switch {
+	case emptyErr == nil && closeErr == nil:
+		return nil
+	case closeErr == nil:
+		return fmt.Errorf("empty Win32 clipboard: %w", emptyErr)
+	case emptyErr == nil:
+		return fmt.Errorf("close Win32 clipboard after clearing: %w", closeErr)
+	default:
+		return errors.Join(
+			fmt.Errorf("empty Win32 clipboard: %w", emptyErr),
+			fmt.Errorf("close Win32 clipboard after clear failure: %w", closeErr),
+		)
+	}
 }
 
 func (o winClipboardOpener) Open() (clipboard.Session, error) {

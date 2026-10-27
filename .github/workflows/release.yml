@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Build Windows release
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build portable Windows binary
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          ./scripts/build.ps1 `
+            -Output ./dist/clipnote-windows-amd64.exe `
+            -Version $env:RELEASE_TAG
+
+      - name: Generate SHA-256 checksum
+        shell: pwsh
+        run: |
+          $asset = Join-Path $PWD "dist\clipnote-windows-amd64.exe"
+          $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = "$hash  clipnote-windows-amd64.exe"
+          Set-Content `
+            -LiteralPath (Join-Path $PWD "dist\SHA256SUMS.txt") `
+            -Value $checksum `
+            -Encoding ascii
+
+      - name: Upload release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload $env:RELEASE_TAG `
+            (Join-Path $PWD "dist\clipnote-windows-amd64.exe") `
+            (Join-Path $PWD "dist\SHA256SUMS.txt") `
+            --clobber
