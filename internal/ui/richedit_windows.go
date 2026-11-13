@@ -21,6 +21,11 @@ const (
 	emSetParaFormat co.WM = co.WM_USER + 71
 	emSetEventMask  co.WM = co.WM_USER + 69
 	emSetOptions    co.WM = co.WM_USER + 77
+	emSetLimitText  co.WM = 0x00c5
+
+	// editorTextLimit lifts the RichEdit default of 32,767 characters. A larger
+	// clip would otherwise leave the control unable to accept further input.
+	editorTextLimit = 0x7ffffffe
 
 	scfDefault   = 0x0000
 	scfSelection = 0x0001
@@ -146,6 +151,22 @@ func richEditParaFormatSize() uintptr {
 
 func faceNameFromRichEditFormat(format *richEditCharFormat) string {
 	return wstr.DecodeSlice(format.SzFaceName[:])
+}
+
+// raiseEditorTextLimit lifts the control's default 32,767-character limit so a
+// large pasted or cached text stays fully editable.
+func raiseEditorTextLimit(hwnd win.HWND) error {
+	if hwnd == 0 {
+		return errors.New("raise RichEdit text limit: window is nil")
+	}
+	if _, err := hwnd.SendMessage(
+		emSetLimitText,
+		win.WPARAM(editorTextLimit),
+		0,
+	); err != nil {
+		return fmt.Errorf("raise RichEdit text limit: %w", err)
+	}
+	return nil
 }
 
 func configureRichEdit(hwnd win.HWND, settings config.EditorConfig) error {

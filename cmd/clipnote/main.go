@@ -34,7 +34,7 @@ const (
 	workerCloseTime    = 3 * time.Second
 )
 
-var version = "1.0.1-dev"
+var version = "1.0.2-dev"
 
 type cliOptions struct {
 	check       bool

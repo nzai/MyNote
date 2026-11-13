@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/rodrigocfd/windigo/co"
@@ -48,6 +49,13 @@ func (d *Document) scrollbarNeeded(bar co.SBB) bool {
 	info.Mask = co.SIF_RANGE | co.SIF_PAGE
 	info.SetCbSize()
 	if err := d.edit.GetScrollInfo(bar, &info); err != nil {
+		if isHiddenScrollbarError(err) {
+			// GetScrollInfo fails with ERROR_NO_SCROLLBARS while the bar is
+			// hidden. The visibility pass above shows the bar before asking
+			// again, so a hidden bar means the content currently fits and this
+			// is a normal state, not an error worth logging.
+			return false
+		}
 		d.logError("query editor scroll range", err)
 		return false
 	}
@@ -110,4 +118,12 @@ func (d *Document) setScrollbarVisibility(visibility scrollbarVisibility) {
 		}
 	}
 	d.scrollbars = visibility
+}
+
+// isHiddenScrollbarError reports whether GetScrollInfo failed only because the
+// scrollbar is currently hidden (ERROR_NO_SCROLLBARS). RichEdit returns that
+// error for the pass that measures a bar it just hid, so callers treat it as
+// "no scrollbar needed" instead of an error.
+func isHiddenScrollbarError(err error) bool {
+	return errors.Is(err, co.ERROR_NO_SCROLLBARS)
 }

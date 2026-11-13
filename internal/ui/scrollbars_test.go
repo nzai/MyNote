@@ -3,6 +3,8 @@
 package ui
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -109,5 +111,33 @@ func assertScrollbars(t *testing.T, document *Document, wantHorizontal, wantVert
 			inner.Right,
 			inner.Bottom,
 		)
+	}
+}
+
+func TestScrollbarQueryIgnoresMissingScrollbars(t *testing.T) {
+	if os.Getenv("CLIPNOTE_GUI_TEST") == "" {
+		t.Skip("set CLIPNOTE_GUI_TEST=1 for Win32 scrollbar log test")
+	}
+	lockGUIThread(t)
+	var logs bytes.Buffer
+	document, err := NewDocument(DocumentOptions{
+		Snapshot: core.Snapshot{
+			CaptureID: "scrollbar-log-test",
+			Kind:      core.KindText,
+			Text:      "short",
+		},
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = document.native.hwnd.ShowWindow(co.SW_HIDE)
+	defer func() {
+		_ = document.native.hwnd.DestroyWindow()
+	}()
+
+	document.updateScrollbars()
+	if strings.Contains(logs.String(), "query editor scroll range") {
+		t.Fatalf("hiding the scrollbar must not be logged as an error:\n%s", logs.String())
 	}
 }

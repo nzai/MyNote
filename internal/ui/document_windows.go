@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -32,7 +33,9 @@ const (
 	onePixelDIP          = 1
 	imageCheckerSizeDIP  = 16
 	saveProgressTimerID  = 2
+	saveNoticeTimerID    = 3
 	saveCompleteMessage  = co.WM_APP + 103
+	saveNoticeDuration   = 4 * time.Second
 )
 
 var (
@@ -49,6 +52,9 @@ var (
 	colorAccent           = colorRef(33, 99, 188)
 	colorCheckerLight     = colorRef(247, 248, 250)
 	colorCheckerDark      = colorRef(231, 234, 239)
+
+	colorWindowBorder         = colorRef(148, 156, 168)
+	colorSaveNoticeBackground = colorRef(232, 240, 252)
 
 	documentRegistry = struct {
 		sync.RWMutex
@@ -127,6 +133,8 @@ type Document struct {
 	saveProgress           progressState
 	saveCancel             context.CancelFunc
 	saveStarted            time.Time
+	saveNotice             string
+	saveNoticeUntil        time.Time
 	closeAfterSave         bool
 	saveResultMu           sync.Mutex
 	saveResult             *saveCompletion
@@ -367,6 +375,9 @@ func (d *Document) createEditor() error {
 		return fmt.Errorf("create document editor: %w", err)
 	}
 	d.edit = edit
+	if err := raiseEditorTextLimit(edit); err != nil {
+		return err
+	}
 	if err := d.applyEditorSettings(d.editorSettings); err != nil {
 		return err
 	}
@@ -443,11 +454,15 @@ func (d *Document) handleNativeMessage(
 		_, _ = hdc.SetBkColor(colorWindowBackground)
 		return uintptr(brush), true
 	case co.WM_TIMER:
-		if int(wParam) != saveProgressTimerID {
-			return 0, false
+		switch int(wParam) {
+		case saveProgressTimerID:
+			d.handleSaveTimer()
+			return 0, true
+		case saveNoticeTimerID:
+			d.handleSaveNoticeTimer()
+			return 0, true
 		}
-		d.handleSaveTimer()
-		return 0, true
+		return 0, false
 	case saveCompleteMessage:
 		d.handleSaveCompletion()
 		return 0, true
@@ -607,7 +622,10 @@ func (d *Document) paint(hdc win.HDC) error {
 	}, border); err != nil {
 		return fmt.Errorf("paint status bar border: %w", err)
 	}
-	return d.paintStatus(hdc, width, statusTop, statusHeight, dpi)
+	if err := d.paintStatus(hdc, width, statusTop, statusHeight, dpi); err != nil {
+		return err
+	}
+	return d.paintWindowBorder(hdc, width, height, dpi)
 }
 
 func (d *Document) paintButtonBackground(hdc win.HDC, width, dpi int) error {
@@ -786,6 +804,19 @@ func (d *Document) paintStatus(
 		return fmt.Errorf("set status bar text background mode: %w", err)
 	}
 	status := d.statusText()
+	textColor := colorTextMuted
+	if d.activeSaveNotice(time.Now()) != "" {
+		background, err := brushFor(colorSaveNoticeBackground)
+		if err != nil {
+			return err
+		}
+		if err := hdc.FillRect(&win.RECT{
+			Left: 0, Top: int32(top), Right: int32(width), Bottom: int32(top + height),
+		}, background); err != nil {
+			return fmt.Errorf("paint save notice background: %w", err)
+		}
+		textColor = colorAccent
+	}
 	textRightPadding := scaleDIP(statusTextPaddingDIP, dpi)
 	if d.activityCancelable() {
 		textRightPadding += scaleDIP(statusCancelWidthDIP, dpi)
@@ -806,7 +837,7 @@ func (d *Document) paintStatus(
 		},
 		fitText(hdc, status, textWidth, d.fonts.ui),
 		d.fonts.ui,
-		colorTextMuted,
+		textColor,
 	); err != nil {
 		return err
 	}
@@ -1048,6 +1079,7 @@ func (d *Document) handleDestroyed() {
 	}
 	d.destroyed = true
 	_ = d.native.hwnd.KillTimer(saveProgressTimerID)
+	_ = d.native.hwnd.KillTimer(saveNoticeTimerID)
 	if d.editorFont != 0 {
 		_ = d.editorFont.DeleteObject()
 		d.editorFont = 0
@@ -1103,6 +1135,7 @@ func (d *Document) saveDocument(saveAs bool) bool {
 	d.saveCancel = cancel
 	d.saveInProgress = true
 	d.saveStatus = ""
+	d.clearSaveNotice()
 	d.saveCancelable = false
 	d.saveStarted = time.Now()
 	delay := d.saveProgress.delay
@@ -1169,6 +1202,67 @@ func (d *Document) handleSaveTimer() {
 	_ = d.native.hwnd.InvalidateRect(nil, true)
 }
 
+func (d *Document) handleSaveNoticeTimer() {
+	if d.native.hwnd == 0 {
+		return
+	}
+	_ = d.native.hwnd.KillTimer(saveNoticeTimerID)
+	now := time.Now()
+	if now.Before(d.saveNoticeUntil) {
+		remaining := d.saveNoticeUntil.Sub(now)
+		if remaining < time.Millisecond {
+			remaining = time.Millisecond
+		}
+		if err := d.native.hwnd.SetTimer(
+			saveNoticeTimerID,
+			int(remaining/time.Millisecond),
+		); err != nil {
+			d.logError("reschedule save notice", err)
+			d.clearSaveNotice()
+			_ = d.native.hwnd.InvalidateRect(nil, true)
+		}
+		return
+	}
+	d.clearSaveNotice()
+	_ = d.native.hwnd.InvalidateRect(nil, true)
+}
+
+// showSaveNotice reports a completed save in the status bar for a few seconds,
+// so a repeated Ctrl+S visibly confirms that the file was overwritten.
+func (d *Document) showSaveNotice(path string) {
+	d.saveNotice = saveNoticeText(path, time.Now())
+	d.saveNoticeUntil = time.Now().Add(saveNoticeDuration)
+	if d.native.hwnd == 0 {
+		return
+	}
+	if err := d.native.hwnd.SetTimer(
+		saveNoticeTimerID,
+		int(saveNoticeDuration/time.Millisecond),
+	); err != nil {
+		d.logError("schedule save notice", err)
+	}
+}
+
+func (d *Document) clearSaveNotice() {
+	d.saveNotice = ""
+	d.saveNoticeUntil = time.Time{}
+}
+
+func (d *Document) activeSaveNotice(now time.Time) string {
+	if d.saveNotice == "" || !now.Before(d.saveNoticeUntil) {
+		return ""
+	}
+	return d.saveNotice
+}
+
+func saveNoticeText(path string, now time.Time) string {
+	name := filepath.Base(path)
+	if name == "" || name == "." {
+		name = path
+	}
+	return fmt.Sprintf("已保存到 %s · %s（Shift：另存为）", name, now.Format("15:04:05"))
+}
+
 func (d *Document) handleSaveCompletion() {
 	d.saveResultMu.Lock()
 	completion := d.saveResult
@@ -1207,6 +1301,7 @@ func (d *Document) handleSaveCompletion() {
 	default:
 		d.saveState.MarkSavedText(completion.result.Path, completion.result.Text)
 		d.saveStatus = "已保存"
+		d.showSaveNotice(completion.result.Path)
 		if d.logger != nil {
 			d.logger.Info(
 				"document saved",
@@ -1322,6 +1417,9 @@ func (d *Document) title() string {
 }
 
 func (d *Document) statusText() string {
+	if notice := d.activeSaveNotice(time.Now()); notice != "" {
+		return notice
+	}
 	var content string
 	switch d.snapshot.Kind {
 	case core.KindImage:

@@ -40,6 +40,7 @@ func Run(options Options) int {
 	}
 	icon, iconOwned, err := loadTrayIcon(options.Logger)
 	if err != nil {
+		logUIFailure(options.Logger, "load tray icon", err)
 		showFatalUIError(err)
 		return 1
 	}
@@ -63,6 +64,7 @@ func Run(options Options) int {
 		if iconOwned {
 			_ = icon.DestroyIcon()
 		}
+		logUIFailure(options.Logger, "create controller", err)
 		showFatalUIError(err)
 		return 1
 	}
@@ -77,10 +79,21 @@ func Run(options Options) int {
 		iconErr = icon.DestroyIcon()
 	}
 	if err := errors.Join(runErr, resourceErr, iconErr); err != nil {
+		logUIFailure(options.Logger, "run message loop", err)
 		showFatalUIError(err)
 		return 1
 	}
 	return exitCode
+}
+
+// logUIFailure records a fatal UI error in the log file. A startup failure that
+// cannot show a message box (for example when the shell tray is unreachable)
+// would otherwise leave no trace at all.
+func logUIFailure(logger *slog.Logger, stage string, err error) {
+	if logger == nil || err == nil {
+		return
+	}
+	logger.Error(stage, "error", err)
 }
 
 func loadTrayIcon(logger *slog.Logger) (win.HICON, bool, error) {
