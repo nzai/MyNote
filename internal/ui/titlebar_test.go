@@ -9,7 +9,7 @@ import (
 )
 
 func TestTitlebarHitTestAt96DPI(t *testing.T) {
-	layout := titlebarLayoutFor(720, 96, 150)
+	layout := titlebarLayoutFor(720, 96)
 	tests := []struct {
 		name string
 		x    int
@@ -28,7 +28,7 @@ func TestTitlebarHitTestAt96DPI(t *testing.T) {
 		{name: "save stays client", x: layout.saveLeft + 10, y: 20, want: co.HT_CLIENT},
 		{name: "options stays client", x: layout.optionsLeft + 10, y: 20, want: co.HT_CLIENT},
 		{name: "close stays client", x: layout.closeLeft + 10, y: 20, want: co.HT_CLIENT},
-		{name: "draggable title", x: 120, y: 20, want: co.HT_CAPTION},
+		{name: "draggable title", x: layout.titleLeft + 40, y: 20, want: co.HT_CAPTION},
 		{name: "content", x: 350, y: 100, want: co.HT_CLIENT},
 	}
 
@@ -42,7 +42,7 @@ func TestTitlebarHitTestAt96DPI(t *testing.T) {
 }
 
 func TestTitlebarHitTestScalesAt192DPI(t *testing.T) {
-	layout := titlebarLayoutFor(1440, 192, 300)
+	layout := titlebarLayoutFor(1440, 192)
 	if got := titlebarHitTest(1440, 1040, 192, layout, layout.saveLeft+20, 40); got != co.HT_CLIENT {
 		t.Fatalf("scaled save area hit = %v, want HT_CLIENT", got)
 	}
@@ -52,7 +52,7 @@ func TestTitlebarHitTestScalesAt192DPI(t *testing.T) {
 }
 
 func TestTitlebarButtonAt(t *testing.T) {
-	layout := titlebarLayoutFor(720, 96, 150)
+	layout := titlebarLayoutFor(720, 96)
 	tests := []struct {
 		name string
 		x    int
@@ -75,27 +75,30 @@ func TestTitlebarButtonAt(t *testing.T) {
 	}
 }
 
-func TestTitlebarLayoutPlacesSaveImmediatelyAfterTitle(t *testing.T) {
-	layout := titlebarLayoutFor(720, 96, 150)
+func TestTitlebarLayoutPlacesButtonsNextToIcon(t *testing.T) {
+	layout := titlebarLayoutFor(720, 96)
 	if layout.iconLeft != 12 {
 		t.Fatalf("iconLeft = %d, want 12", layout.iconLeft)
 	}
-	if layout.titleLeft != 36 {
-		t.Fatalf("titleLeft = %d, want 36", layout.titleLeft)
-	}
-	if layout.saveLeft != layout.titleLeft+150+8 {
-		t.Fatalf("saveLeft = %d, want %d", layout.saveLeft, layout.titleLeft+158)
-	}
-	if layout.saveLeft-layout.titleRight != 8 {
-		t.Fatalf("title-to-save gap = %d, want 8", layout.saveLeft-layout.titleRight)
+	if layout.saveLeft != layout.iconLeft+16+8 {
+		t.Fatalf("saveLeft = %d, want icon end plus gap %d", layout.saveLeft, layout.iconLeft+24)
 	}
 	if layout.optionsLeft != layout.saveRight {
 		t.Fatalf("optionsLeft = %d, want saveRight %d", layout.optionsLeft, layout.saveRight)
 	}
+	if layout.titleLeft != layout.optionsRight+8 {
+		t.Fatalf("titleLeft = %d, want optionsRight plus gap %d", layout.titleLeft, layout.optionsRight+8)
+	}
+	if layout.titleLeft <= layout.optionsRight {
+		t.Fatalf("title starts at %d, overlapping options ending at %d", layout.titleLeft, layout.optionsRight)
+	}
+	if layout.titleRight != layout.closeLeft-8 {
+		t.Fatalf("titleRight = %d, want close button minus gap %d", layout.titleRight, layout.closeLeft-8)
+	}
 }
 
 func TestTitlebarLayoutKeepsButtonsSeparateInNarrowWindow(t *testing.T) {
-	layout := titlebarLayoutFor(320, 96, 600)
+	layout := titlebarLayoutFor(320, 96)
 	if layout.optionsRight > layout.closeLeft {
 		t.Fatalf(
 			"options button ends at %d and overlaps close button starting at %d",

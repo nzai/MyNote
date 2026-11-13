@@ -432,7 +432,7 @@ func TestOptionsTitlebarButtonOpensOwnedTopLevelWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	dpi := dpiFor(document.native.hwnd)
-	layout := titlebarLayoutFor(width, dpi, document.titleTextWidth)
+	layout := titlebarLayoutFor(width, dpi)
 	x := (layout.optionsLeft + layout.optionsRight) / 2
 	y := scaleDIP(titlebarHeightDIP/2, dpi)
 	ownerBefore, err := document.native.hwnd.GetWindowRect()

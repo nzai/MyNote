@@ -7,8 +7,7 @@ import "github.com/rodrigocfd/windigo/co"
 const (
 	titlebarHeightDIP     = 40
 	titlebarPaddingDIP    = 12
-	titleSaveGapDIP       = 8
-	iconTitleGapDIP       = 8
+	titlebarGapDIP        = 8
 	saveButtonWidthDIP    = 44
 	optionsButtonWidthDIP = 44
 	closeButtonWidthDIP   = 44
@@ -36,30 +35,23 @@ type titlebarLayout struct {
 	closeLeft    int
 }
 
-func titlebarLayoutFor(width, dpi, titleWidth int) titlebarLayout {
-	if titleWidth < 0 {
-		titleWidth = 0
-	}
+// titlebarLayoutFor positions the title-bar controls: the app icon sits at the
+// left padding, the save and options buttons follow it, and the document title
+// starts after them and runs up to the close button on the right.
+func titlebarLayoutFor(width, dpi int) titlebarLayout {
+	gap := scaleDIP(titlebarGapDIP, dpi)
 	iconLeft := scaleDIP(titlebarPaddingDIP, dpi)
-	titleLeft := iconLeft + scaleDIP(appIconWidthDIP+iconTitleGapDIP, dpi)
-	gap := scaleDIP(titleSaveGapDIP, dpi)
 	saveWidth := scaleDIP(saveButtonWidthDIP, dpi)
 	optionsWidth := scaleDIP(optionsButtonWidthDIP, dpi)
 	closeWidth := scaleDIP(closeButtonWidthDIP, dpi)
 
-	closeLeft := width - closeWidth
-	maxSaveLeft := closeLeft - optionsWidth - saveWidth
-	if maxSaveLeft < titleLeft {
-		maxSaveLeft = titleLeft
-	}
-	saveLeft := titleLeft + titleWidth + gap
-	if saveLeft > maxSaveLeft {
-		saveLeft = maxSaveLeft
-	}
+	saveLeft := iconLeft + scaleDIP(appIconWidthDIP, dpi) + gap
 	saveRight := saveLeft + saveWidth
 	optionsLeft := saveRight
 	optionsRight := optionsLeft + optionsWidth
-	titleRight := saveLeft - gap
+	titleLeft := optionsRight + gap
+	closeLeft := width - closeWidth
+	titleRight := closeLeft - gap
 	if titleRight < titleLeft {
 		titleRight = titleLeft
 	}

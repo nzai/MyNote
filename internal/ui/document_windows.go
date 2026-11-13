@@ -122,7 +122,6 @@ type Document struct {
 	editorTextLength       int
 	lineNumberFirstVisible int
 	contentTitle           string
-	titleTextWidth         int
 	hover                  titlebarButton
 	tracking               bool
 	cacheState             string
@@ -387,7 +386,7 @@ func (d *Document) createEditor() error {
 	if err := edit.SetWindowText(normalizeEditorText(d.snapshot.Text)); err != nil {
 		return fmt.Errorf("set document editor text: %w", err)
 	}
-	d.updateTitleTextWidth()
+
 	d.layoutEditor()
 	d.updateScrollbars()
 	_ = d.native.hwnd.InvalidateRect(nil, true)
@@ -423,7 +422,7 @@ func (d *Document) handleNativeMessage(
 		if err != nil {
 			return 0, false
 		}
-		layout := titlebarLayoutFor(width, dpi, d.titleTextWidth)
+		layout := titlebarLayoutFor(width, dpi)
 		return uintptr(titlebarHitTest(
 			width,
 			height,
@@ -575,9 +574,7 @@ func (d *Document) paint(hdc win.HDC) error {
 	}, titlebar); err != nil {
 		return fmt.Errorf("paint titlebar: %w", err)
 	}
-	if err := d.measureTitleTextWidth(hdc); err != nil {
-		return err
-	}
+
 	if err := d.paintButtonBackground(hdc, width, dpi); err != nil {
 		return err
 	}
@@ -641,7 +638,7 @@ func (d *Document) paintButtonBackground(hdc win.HDC, width, dpi int) error {
 	if err != nil {
 		return err
 	}
-	layout := titlebarLayoutFor(width, dpi, d.titleTextWidth)
+	layout := titlebarLayoutFor(width, dpi)
 	rect := win.RECT{Top: 0, Bottom: int32(titleHeight)}
 	switch d.hover {
 	case titlebarButtonSave:
@@ -665,7 +662,7 @@ func (d *Document) paintTitle(hdc win.HDC, width, titleHeight, dpi int) error {
 		return fmt.Errorf("set titlebar text background mode: %w", err)
 	}
 
-	layout := titlebarLayoutFor(width, dpi, d.titleTextWidth)
+	layout := titlebarLayoutFor(width, dpi)
 	iconTop := (titleHeight - scaleDIP(appIconWidthDIP, dpi)) / 2
 	if err := d.paintAppIcon(hdc, layout.iconLeft, iconTop, dpi); err != nil {
 		return err
@@ -740,39 +737,6 @@ func (d *Document) paintTitle(hdc win.HDC, width, titleHeight, dpi int) error {
 		d.fonts.icon,
 		closeColor,
 	)
-}
-
-func (d *Document) measureTitleTextWidth(hdc win.HDC) error {
-	oldFont, err := hdc.SelectObjectFont(d.fonts.title)
-	if err != nil {
-		return fmt.Errorf("select title font for measurement: %w", err)
-	}
-	defer func() {
-		_, _ = hdc.SelectObjectFont(oldFont)
-	}()
-	size, err := hdc.GetTextExtentPoint32(d.title())
-	if err != nil {
-		return fmt.Errorf("measure titlebar text: %w", err)
-	}
-	d.titleTextWidth = int(size.Cx)
-	return nil
-}
-
-func (d *Document) updateTitleTextWidth() {
-	if d.native.hwnd == 0 {
-		return
-	}
-	hdc, err := d.native.hwnd.GetDC()
-	if err != nil {
-		d.logError("get titlebar measuring DC", err)
-		return
-	}
-	defer func() {
-		_ = d.native.hwnd.ReleaseDC(hdc)
-	}()
-	if err := d.measureTitleTextWidth(hdc); err != nil {
-		d.logError("measure titlebar layout", err)
-	}
 }
 
 func (d *Document) paintAppIcon(hdc win.HDC, left, top, dpi int) error {
@@ -1032,7 +996,7 @@ func (d *Document) handleClick(lParam win.LPARAM) {
 		_ = d.native.hwnd.InvalidateRect(nil, true)
 		return
 	}
-	layout := titlebarLayoutFor(width, dpi, d.titleTextWidth)
+	layout := titlebarLayoutFor(width, dpi)
 	switch titlebarButtonAt(layout, height, dpi, x, y) {
 	case titlebarButtonSave:
 		shift, _ := win.GetKeyState(co.VK_SHIFT)
@@ -1052,7 +1016,7 @@ func (d *Document) handleMouseMove(lParam win.LPARAM) {
 	}
 	x, y := decodeMousePosition(uintptr(lParam))
 	dpi := dpiFor(d.native.hwnd)
-	layout := titlebarLayoutFor(width, dpi, d.titleTextWidth)
+	layout := titlebarLayoutFor(width, dpi)
 	next := titlebarButtonAt(layout, height, dpi, x, y)
 	if next != d.hover {
 		d.hover = next
@@ -1396,7 +1360,7 @@ func (d *Document) logError(message string, err error) {
 func (d *Document) refreshTitle() {
 	title := d.title()
 	_ = d.native.hwnd.SetWindowText(title)
-	d.updateTitleTextWidth()
+
 	_ = d.native.hwnd.InvalidateRect(nil, true)
 }
 
